@@ -9,27 +9,22 @@ fn printableAscii() []const u21 {
     return ret;
 }
 
-pub fn main() !void {
-    var dbg_alloc: std.heap.DebugAllocator(.{ .stack_trace_frames = 10 }) = .init;
-    defer _ = dbg_alloc.deinit();
+pub fn main(init: std.process.Init) !void {
+    const clock_res = try std.Io.Clock.resolution(.real, init.io);
+    if (clock_res.nanoseconds == 0)
+        return error.UnsupportedClock;
 
-    const allocator = dbg_alloc.allocator();
-
-    var threaded: std.Io.Threaded = .init(allocator);
-    defer threaded.deinit();
-    const io = threaded.io();
-
-    stbi.init(allocator);
+    stbi.init(init.gpa, init.io);
     defer stbi.deinit();
 
-    var file = try std.fs.cwd().openFile("assets/DMSerifDisplay-Regular.ttf", .{});
-    defer file.close();
+    var file = try std.Io.Dir.cwd().openFile(init.io, "assets/DMSerifDisplay-Regular.ttf", .{});
+    defer file.close(init.io);
 
     var read_buf: [4096]u8 = undefined;
-    var reader = file.reader(io, &read_buf);
+    var reader = file.reader(init.io, &read_buf);
 
-    const font_memory = try reader.interface.allocRemaining(allocator, .unlimited);
-    defer allocator.free(font_memory);
+    const font_memory = try reader.interface.allocRemaining(init.gpa, .unlimited);
+    defer init.gpa.free(font_memory);
 
     var gen: Generator = try .create(font_memory);
     defer gen.destroy();
@@ -51,12 +46,14 @@ pub fn main() !void {
     });
 
     const gen_opts: Generator.GenerationOptions = .{ .sdf_type = .mtsdf, .px_size = 64, .px_range = 8 };
-
     inline for (.{ 'A', 'B', 'C' }) |codepoint| {
-        var timer: std.time.Timer = try .start();
-        const data = try gen.generateSingle(allocator, codepoint, gen_opts);
-        defer data.deinit(allocator);
-        std.log.info("SDF for codepoint {u} generated in: {d}us", .{ codepoint, @divFloor(timer.read(), std.time.ns_per_us) });
+        const time: std.Io.Timestamp = .now(init.io, .real);
+        const data = try gen.generateSingle(init.gpa, codepoint, gen_opts);
+        defer data.deinit(init.gpa);
+        std.log.info("SDF for codepoint {u} generated in: {}us", .{
+            codepoint,
+            @divFloor(time.durationTo(.now(init.io, .real)).nanoseconds, std.time.ns_per_us),
+        });
 
         var image: stbi.Image = try .createEmpty(data.glyph_data.width, data.glyph_data.height, gen_opts.sdf_type.numChannels(), .{});
         defer image.deinit();
@@ -68,9 +65,9 @@ pub fn main() !void {
 
     const atlas_w = 512;
     const atlas_h = 512;
-    var timer: std.time.Timer = try .start();
+    const time: std.Io.Timestamp = .now(init.io, .real);
     const data = try gen.generateAtlas(
-        allocator,
+        init.gpa,
         comptime printableAscii(),
         atlas_w,
         atlas_h,
@@ -78,8 +75,10 @@ pub fn main() !void {
         true,
         gen_opts,
     );
-    defer data.deinit(allocator);
-    std.log.info("SDF for atlas generated in: {d}us", .{@divFloor(timer.read(), std.time.ns_per_us)});
+    defer data.deinit(init.gpa);
+    std.log.info("SDF for atlas generated in: {}us", .{
+        @divFloor(time.durationTo(.now(init.io, .real)).nanoseconds, std.time.ns_per_us),
+    });
 
     var image: stbi.Image = try .createEmpty(atlas_w, atlas_h, gen_opts.sdf_type.numChannels(), .{});
     defer image.deinit();

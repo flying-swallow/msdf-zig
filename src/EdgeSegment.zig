@@ -274,7 +274,7 @@ pub fn scanlineIntersections(self: EdgeSegment, x: *[3]f64, dy: *[3]i32, y: f64)
             if (y >= p[0][1] and y < p[1][1] or y >= p[1][1] and y < p[0][1]) {
                 const param = (y - p[0][1]) / (p[1][1] - p[0][1]);
                 x[0] = mix(p[0][0], p[1][0], param);
-                dy[0] = @intFromFloat(std.math.sign(p[1][1] - p[0][1]));
+                dy[0] = std.math.sign(p[1][1] - p[0][1]);
                 return 1;
             }
             return 0;
