@@ -16,6 +16,21 @@ const EdgeSegment = @This();
 const cubic_starts = 4;
 const cubic_steps = 4;
 
+// Cubic Bezier and its first two derivatives, in the (qa, ab, br, as) basis the
+// distance search works in: qa = p0-origin, ab = p1-p0, br = p2-p1-ab,
+// as = (p3-p2)-(p2-p1)-br.
+fn cubicPoint(qa: Vec2, ab: Vec2, br: Vec2, as: Vec2, t: f64) Vec2 {
+    return qa + ab * v2(3.0 * t) + br * v2(3.0 * t * t) + as * v2(t * t * t);
+}
+
+fn cubicDerivative(ab: Vec2, br: Vec2, as: Vec2, t: f64) Vec2 {
+    return ab * v2(3.0) + br * v2(6.0 * t) + as * v2(3.0 * t * t);
+}
+
+fn cubicDerivative2(br: Vec2, as: Vec2, t: f64) Vec2 {
+    return br * v2(6.0) + as * v2(6.0 * t);
+}
+
 color: EdgeColor = .white,
 segment: union(enum) {
     linear: [2]Vec2,
@@ -225,20 +240,29 @@ pub fn signedDistance(self: EdgeSegment, origin: Vec2, param: *f64) SignedDistan
                 param.* = dot(ep_dir - (p[3] - origin), ep_dir) / dot(ep_dir, ep_dir);
             }
 
-            for (0..cubic_starts) |i| {
+            // Iterative minimum distance search. Every quantity below depends on
+            // `t`, so all of them have to be recomputed from the refined `t` on
+            // each step -- hoisting any of them out of the loop silently turns
+            // this into a single Newton step with stale coefficients.
+            for (0..cubic_starts + 1) |i| {
                 const fi: f64 = @floatFromInt(i);
                 var t = fi / cubic_starts;
-                const t_cubed = v2(t * t * t);
-                const t_sqr_3 = v2(t * t * 3.0);
-                const t_6 = v2(t * 6.0);
-                const t_3 = v2(t * 3.0);
-                var qe = qa + ab * t_3 + br * t_sqr_3 + as * t_cubed;
-                for (0..cubic_steps) |_| {
-                    const d1 = ab * v2(3.0) + br * t_6 + as * t_sqr_3;
-                    const d2 = br * v2(6.0) + as * t_6;
-                    t -= dot(qe, d1) / (dot(d1, d1) + dot(qe, d2));
-                    if (t <= 0 or t >= 1) break;
-                    qe = qa + ab * t_3 + br * t_sqr_3 + as * t_cubed;
+                var qe = cubicPoint(qa, ab, br, as, t);
+                var d1 = cubicDerivative(ab, br, as, t);
+                var d2 = cubicDerivative2(br, as, t);
+                var improved_t = t - dot(qe, d1) / (dot(d1, d1) + dot(qe, d2));
+                if (improved_t > 0 and improved_t < 1) {
+                    var remaining_steps: u32 = cubic_steps;
+                    while (true) {
+                        t = improved_t;
+                        qe = cubicPoint(qa, ab, br, as, t);
+                        d1 = cubicDerivative(ab, br, as, t);
+                        remaining_steps -= 1;
+                        if (remaining_steps == 0) break;
+                        d2 = cubicDerivative2(br, as, t);
+                        improved_t = t - dot(qe, d1) / (dot(d1, d1) + dot(qe, d2));
+                        if (!(improved_t > 0 and improved_t < 1)) break;
+                    }
                     dist = math.length(qe);
                     if (dist < @abs(min_dist)) {
                         min_dist = math.nonZeroSign(cross(d1, qe)) * dist;
@@ -295,14 +319,19 @@ pub fn scanlineIntersections(self: EdgeSegment, x: *[3]f64, dy: *[3]i32, y: f64)
             var roots: [2]f64 = undefined;
             const num_solutions = equations.solveQuadratic(&roots, br[1], 2 * ab[1], p[0][1] - y);
             if (num_solutions >= 2 and roots[0] > roots[1]) std.mem.swap(f64, &roots[0], &roots[1]);
-            for (roots[0..num_solutions]) |root| if (root >= 0 and root <= 1) {
-                x[total] = p[0][0] + 2 * root * ab[0] + root * root * br[0];
-                if (@as(f64, @floatFromInt(next_dy)) * (ab[1] + root * br[1]) >= 0) {
-                    dy[total] = next_dy;
-                    total += 1;
-                    next_dy = -next_dy;
+            // A quadratic crosses a scanline at most twice; the cap keeps an
+            // endpoint-plus-two-roots case from reporting a third crossing.
+            for (roots[0..num_solutions]) |root| {
+                if (total >= 2) break;
+                if (root >= 0 and root <= 1) {
+                    x[total] = p[0][0] + 2 * root * ab[0] + root * root * br[0];
+                    if (@as(f64, @floatFromInt(next_dy)) * (ab[1] + root * br[1]) >= 0) {
+                        dy[total] = next_dy;
+                        total += 1;
+                        next_dy = -next_dy;
+                    }
                 }
-            };
+            }
 
             if (p[2][1] == y) {
                 if (next_dy > 0 and total > 0) {
@@ -356,14 +385,19 @@ pub fn scanlineIntersections(self: EdgeSegment, x: *[3]f64, dy: *[3]i32, y: f64)
                 }
             }
 
-            for (roots[0..num_solutions]) |root| if (root >= 0 and root <= 1) {
-                x[total] = p[0][0] + 3 * root * ab[0] + 3 * root * root * br[0] + root * root * root * as[0];
-                if (@as(f64, @floatFromInt(next_dy)) * (ab[1] + 2 * root * br[1] + root * root * as[1]) >= 0) {
-                    dy[total] = next_dy;
-                    total += 1;
-                    next_dy = -next_dy;
+            // `total < 3` is load-bearing: x and dy are [3], and an endpoint
+            // counted above plus three in-range roots would write x[3].
+            for (roots[0..num_solutions]) |root| {
+                if (total >= 3) break;
+                if (root >= 0 and root <= 1) {
+                    x[total] = p[0][0] + 3 * root * ab[0] + 3 * root * root * br[0] + root * root * root * as[0];
+                    if (@as(f64, @floatFromInt(next_dy)) * (ab[1] + 2 * root * br[1] + root * root * as[1]) >= 0) {
+                        dy[total] = next_dy;
+                        total += 1;
+                        next_dy = -next_dy;
+                    }
                 }
-            };
+            }
 
             if (p[3][1] == y) {
                 if (next_dy > 0 and total > 0) {
@@ -429,7 +463,7 @@ pub fn bound(self: EdgeSegment, l: *f64, b: *f64, r: *f64, t: *f64) void {
             pointBounds(p[3], l, b, r, t);
             const a0 = p[1] - p[0];
             const a1 = (p[2] - p[1] - a0) * v2(2.0);
-            const a2 = p[3] - (p[2] * v2(3.0) + p[1] * v2(3.0)) - p[0];
+            const a2 = p[3] - p[2] * v2(3.0) + p[1] * v2(3.0) - p[0];
             var roots: [2]f64 = undefined;
             var roots_len = equations.solveQuadratic(&roots, a2[0], a1[0], a0[0]);
             for (roots[0..roots_len]) |root| if (root > 0 and root < 1) pointBounds(self.point(root), l, b, r, t);
@@ -549,9 +583,13 @@ pub fn deconverge(self: *EdgeSegment, param: u32, vector: Vec2) void {
     }
 
     const p = self.segment.cubic_bezier;
+    // Move the inner control point along `vector`, by the length of the handle
+    // it belongs to: p[1] += |p[1]-p[0]| * vector. Taking the length of the
+    // componentwise product instead would both lose the direction and scale it
+    // wrong.
     switch (param) {
-        0 => self.segment.cubic_bezier[1] = p[1] + v2(math.length(vector * (p[1] - p[0]))),
-        1 => self.segment.cubic_bezier[2] = p[2] + v2(math.length(vector * (p[2] - p[3]))),
+        0 => self.segment.cubic_bezier[1] = p[1] + vector * v2(math.length(p[1] - p[0])),
+        1 => self.segment.cubic_bezier[2] = p[2] + vector * v2(math.length(p[2] - p[3])),
         else => @panic("Unsupported operation"),
     }
 }

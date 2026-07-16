@@ -1,12 +1,17 @@
 const std = @import("std");
 
-const EdgeColor = @import("edge_color.zig").EdgeColor;
+const edge_color = @import("edge_color.zig");
+const EdgeColor = edge_color.EdgeColor;
+const Seed = edge_color.Seed;
 const EdgeSegment = @import("EdgeSegment.zig");
 const math = @import("math.zig");
 const Shape = @import("Shape.zig");
 
 const Vec2 = @Vector(2, f64);
 
+/// For each position < n, returns -1, 0, or 1 depending on whether the position
+/// is closer to the beginning, middle, or end. Balanced: the total over
+/// positions 0..n-1 is zero.
 fn symmetricalTrichotomy(pos: usize, n: usize) i32 {
     const fpos: f64 = @floatFromInt(pos);
     const fn1: f64 = @floatFromInt(n - 1);
@@ -17,14 +22,18 @@ fn isCorner(a: Vec2, b: Vec2, cross_threshold: f64) bool {
     return math.dot(a, b) <= 0 or @abs(math.cross(a, b)) > cross_threshold;
 }
 
-pub fn colorShape(allocator: std.mem.Allocator, shape: *Shape, angle_threshold: f64) !void {
+/// Port of msdfgen's `edgeColoringSimple`.
+pub fn colorShape(allocator: std.mem.Allocator, shape: *Shape, angle_threshold: f64, seed_value: u64) !void {
     const cross_threshold = @sin(angle_threshold);
-    var color: EdgeColor = .init();
+    var seed: Seed = .init(seed_value);
+    var color: EdgeColor = seed.initColor();
     var corners: std.ArrayList(u32) = .empty;
     defer corners.deinit(allocator);
+
     for (shape.contours.items) |*contour| {
         if (contour.edges.items.len == 0) continue;
 
+        // Identify corners
         corners.clearRetainingCapacity();
         var prev_dir = contour.edges.getLast().direction(1);
         for (contour.edges.items, 0..) |edge, i| {
@@ -34,47 +43,77 @@ pub fn colorShape(allocator: std.mem.Allocator, shape: *Shape, angle_threshold: 
         }
 
         switch (corners.items.len) {
+            // Smooth contour
             0 => {
-                color.random();
+                seed.switchColor(&color);
                 for (contour.edges.items) |*edge| edge.color = color;
             },
+            // "Teardrop" case
             1 => {
-                var colors: [3]EdgeColor = .{ .black, .white, .black };
-                inline for (.{ 0, 2 }) |i| {
-                    color.random();
-                    colors[i] = color;
-                }
+                var colors: [3]EdgeColor = undefined;
+                seed.switchColor(&color);
+                colors[0] = color;
+                colors[1] = .white;
+                seed.switchColor(&color);
+                colors[2] = color;
+
                 const corner = corners.items[0];
-                const corner_idx = 3 * corner;
-                const edges_len = contour.edges.items.len;
-                if (edges_len >= 3) {
-                    for (contour.edges.items, 0..) |*edge, i| edge.color = colors[@intCast(1 + symmetricalTrichotomy(i, edges_len))];
-                } else if (edges_len >= 1) {
+                const m = contour.edges.items.len;
+                if (m >= 3) {
+                    // The pattern is anchored at the corner, so the walk starts
+                    // there and wraps.
+                    for (0..m) |i|
+                        contour.edges.items[(corner + i) % m].color =
+                            colors[@intCast(1 + symmetricalTrichotomy(i, m))];
+                } else {
+                    // Fewer than three edges for three colors, so they must be
+                    // split. `parts` is laid out so that the corner's edge always
+                    // occupies the first slot of its triple.
                     var parts: [7]EdgeSegment = @splat(.{});
-                    contour.edges.items[0].splitInThirds(parts[corner_idx..][0..3]);
-                    if (edges_len >= 2) {
-                        contour.edges.items[1].splitInThirds(parts[3 - corner_idx ..][0..3]);
-                        for (0..6) |i| parts[i].color = colors[@divFloor(i, 2)];
-                    } else for (0..3) |i| parts[i].color = colors[i];
+                    var filled: [7]bool = @splat(false);
+                    const base = 3 * corner;
+                    contour.edges.items[0].splitInThirds(parts[base..][0..3]);
+                    for (base..base + 3) |i| filled[i] = true;
+                    if (m >= 2) {
+                        const other = 3 - 3 * corner;
+                        contour.edges.items[1].splitInThirds(parts[other..][0..3]);
+                        for (other..other + 3) |i| filled[i] = true;
+                        parts[0].color = colors[0];
+                        parts[1].color = colors[0];
+                        parts[2].color = colors[1];
+                        parts[3].color = colors[1];
+                        parts[4].color = colors[2];
+                        parts[5].color = colors[2];
+                    } else {
+                        parts[0].color = colors[0];
+                        parts[1].color = colors[1];
+                        parts[2].color = colors[2];
+                    }
                     contour.edges.clearRetainingCapacity();
-                    for (0..@min(corner_idx, 3 - corner_idx)) |i|
-                        try contour.edges.append(allocator, parts[i]);
+                    for (parts, filled) |part, is_filled|
+                        if (is_filled) try contour.edges.append(allocator, part);
                 }
             },
+            // Multiple corners
             else => {
-                const corners_len = corners.items.len;
+                const corner_count = corners.items.len;
                 var spline: u32 = 0;
                 const start = corners.items[0];
-                const edges_len = contour.edges.items.len;
-                color.random();
+                const m = contour.edges.items.len;
+                seed.switchColor(&color);
                 const initial_color = color;
-                for (0..edges_len) |i| {
-                    const idx = (start + i) % edges_len;
-                    if (spline + 1 < corners_len and corners.items[spline + 1] == idx) {
+                for (0..m) |i| {
+                    const index = (start + i) % m;
+                    if (spline + 1 < corner_count and corners.items[spline + 1] == index) {
                         spline += 1;
-                        color.change(if (spline == corners_len - 1) initial_color else .black);
+                        // Banning the initial color on the last spline keeps the
+                        // wrap-around seam from repeating a color.
+                        seed.switchColorBanned(
+                            &color,
+                            if (spline == corner_count - 1) initial_color else .black,
+                        );
                     }
-                    contour.edges.items[idx].color = color;
+                    contour.edges.items[index].color = color;
                 }
             },
         }

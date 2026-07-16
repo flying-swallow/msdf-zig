@@ -5,11 +5,10 @@ const pack = @import("turbopack");
 
 const coloring = @import("coloring.zig");
 const Contour = @import("Contour.zig");
-const edge_color = @import("edge_color.zig");
-const EdgeColor = edge_color.EdgeColor;
-const EdgeSegment = @import("EdgeSegment.zig");
+const edge_selectors = @import("edge_selectors.zig");
 const ErrorCorrection = @import("ErrorCorrection.zig");
 const math = @import("math.zig");
+const pixel_conversion = @import("pixel_conversion.zig");
 const Scanline = @import("Scanline.zig");
 const Shape = @import("Shape.zig");
 const SignedDistance = @import("SignedDistance.zig");
@@ -128,7 +127,9 @@ pub const GenerationOptions = struct {
     sdf_type: SdfType,
     px_size: u16,
     px_range: u16,
-    coloring_rng_seed: u64 = 0,
+    /// Selects one of the deterministic edge colorings. Not an RNG seed: the
+    /// same value always yields the same coloring, matching msdfgen.
+    coloring_seed: u64 = 0,
     corner_angle_threshold: f64 = 3.0,
     orientation: OrientationType = .guess,
     geometry_preprocess: bool = false,
@@ -145,12 +146,6 @@ const FreetypeContext = struct {
     shape: *Shape,
     pos: Vec2 = @splat(0.0),
     contour: ?*Contour = null,
-};
-
-const PsdfData = struct {
-    min_dist: SignedDistance = .{},
-    near_edge: ?*EdgeSegment = null,
-    near_param: f64 = 0,
 };
 
 library: ft.Library = undefined,
@@ -208,8 +203,6 @@ pub fn generateSingle(
     codepoint: u21,
     gen_opts: GenerationOptions,
 ) !SingleGlyphData {
-    edge_color.rng.seed(gen_opts.coloring_rng_seed);
-
     try self.handleVarFont(allocator, gen_opts.var_font_args, self.face.faceFlags());
 
     const scale = 1.0 / f64i(self.face.unitsPerEM());
@@ -293,8 +286,6 @@ pub fn generateAtlas(
     use_kerning: bool,
     gen_opts: GenerationOptions,
 ) !AtlasData {
-    edge_color.rng.seed(gen_opts.coloring_rng_seed);
-
     const face_flags = self.face.faceFlags();
     try self.handleVarFont(allocator, gen_opts.var_font_args, face_flags);
 
@@ -560,11 +551,11 @@ fn getSdfPixelsInner(
         .sdf => generateSdf(pixels, w, h, f_px_size, shape.*, px_range, translate_x, translate_y, invert_pixels),
         .psdf => generatePsdf(pixels, w, h, f_px_size, shape.*, px_range, translate_x, translate_y, invert_pixels),
         .msdf, .msdf10 => {
-            try coloring.colorShape(allocator, shape, opts.corner_angle_threshold);
+            try coloring.colorShape(allocator, shape, opts.corner_angle_threshold, opts.coloring_seed);
             generateMsdf(pixels, w, h, f_px_size, shape.*, px_range, translate_x, translate_y, invert_pixels);
         },
         .mtsdf => {
-            try coloring.colorShape(allocator, shape, opts.corner_angle_threshold);
+            try coloring.colorShape(allocator, shape, opts.corner_angle_threshold, opts.coloring_seed);
             generateMtsdf(pixels, w, h, f_px_size, shape.*, px_range, translate_x, translate_y, invert_pixels);
         },
     }
@@ -596,7 +587,8 @@ fn getSdfPixelsInner(
             ),
         };
 
-    if (error_correction) |*ec| ec.correct(shape, f_px_size, px_range, translate_x, translate_y, pixels, w, h, channels);
+    if (error_correction) |*ec|
+        ec.correct(shape, f_px_size, px_range, translate_x, translate_y, pixels, w, h, channels, invert_pixels);
     return pixels;
 }
 
@@ -628,7 +620,7 @@ fn getSdfPixels(
     for (0..h) |y| for (0..w) |x| {
         const idx = y * w * channels + x * channels;
         for (0..channels) |i|
-            pixels[idx + i] = @intFromFloat(std.math.maxInt(u8) * std.math.clamp(float_pixels[idx + i], 0.0, 1.0));
+            pixels[idx + i] = pixel_conversion.floatToUnorm(u8, float_pixels[idx + i]);
     };
     return pixels;
 }
@@ -662,9 +654,9 @@ fn getMsdf10Pixels(
         const dist_rgb = float_pixels[y * w * channels + x * channels ..];
         pixels[y * w + x] = .{
             .a = std.math.maxInt(u2),
-            .b = @intFromFloat(std.math.maxInt(u10) * std.math.clamp(dist_rgb[2], 0.0, 1.0)),
-            .g = @intFromFloat(std.math.maxInt(u10) * std.math.clamp(dist_rgb[1], 0.0, 1.0)),
-            .r = @intFromFloat(std.math.maxInt(u10) * std.math.clamp(dist_rgb[0], 0.0, 1.0)),
+            .b = pixel_conversion.floatToUnorm(u10, dist_rgb[2]),
+            .g = pixel_conversion.floatToUnorm(u10, dist_rgb[1]),
+            .r = pixel_conversion.floatToUnorm(u10, dist_rgb[0]),
         };
     };
     return pixels;
@@ -710,8 +702,12 @@ fn msdfSignCorrection(
     var scanline: Scanline = .{};
     defer scanline.intersections.deinit(allocator);
     var ambiguous = false;
-    var match_map: []i32 = try allocator.alloc(i32, w * h);
+    const match_map: []i32 = try allocator.alloc(i32, w * h);
     defer allocator.free(match_map);
+    // The ambiguous branch below leaves an entry unwritten, and the second pass
+    // keys on it being 0. C++ gets this from std::vector's value-initialization;
+    // alloc here hands back undefined memory, so it has to be done explicitly.
+    @memset(match_map, 0);
     var match_idx: usize = 0;
     const scaled_w = w * channels;
     for (0..h) |y| {
@@ -738,13 +734,14 @@ fn msdfSignCorrection(
     for (0..h) |y| {
         const row = h - y - 1;
         for (0..w) |x| {
-            const match = match_map[match_idx];
-            if (match == 0) {
+            // Only texels left ambiguous above (median exactly on the boundary)
+            // are resolved here, by taking the sign their neighbours agreed on.
+            if (match_map[match_idx] == 0) {
                 var neighbor_match: i32 = 0;
-                if (x > 0) neighbor_match += match - 1;
-                if (x < w - 1) neighbor_match += match + 1;
-                if (y > 0) neighbor_match += match - w;
-                if (y < h - 1) neighbor_match += match + w;
+                if (x > 0) neighbor_match += match_map[match_idx - 1];
+                if (x < w - 1) neighbor_match += match_map[match_idx + 1];
+                if (y > 0) neighbor_match += match_map[match_idx - w];
+                if (y < h - 1) neighbor_match += match_map[match_idx + w];
                 if (neighbor_match < 0) {
                     for (out_pixels[row * scaled_w + x * channels ..][0..3]) |*px|
                         px.* = 1.0 - px.*;
@@ -765,23 +762,29 @@ fn findDistanceAt(shape: Shape, p: Vec2, px_range: f64) f64 {
     return (min_dist.distance + px_range / 2.0) / px_range;
 }
 
+/// Maps a signed distance to the normalized [0,1] the bitmap stores, applying
+/// the whole-bitmap flip when the shape's winding reads inside-out.
+fn mapDistance(distance: f64, px_range: f64, invert_pixels: bool) f64 {
+    const d = (distance + px_range / 2.0) / px_range;
+    return if (invert_pixels) 1.0 - d else d;
+}
+
+/// Sample point for bitmap column `x` / shape row `y`, i.e. the inverse of
+/// msdfgen's Projection::project.
+fn samplePoint(x: usize, y: usize, scale: f64, tx: f64, ty: f64) Vec2 {
+    return .{
+        (f64i(x) + 0.5) / scale - tx,
+        (f64i(y) + 0.5) / scale - ty,
+    };
+}
+
 fn generateSdf(out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px_range: f64, tx: f64, ty: f64, invert_pixels: bool) void {
     for (0..h) |y| {
         const row = h - y - 1;
         for (0..w) |x| {
-            var dummy: f64 = 0;
-            const p: Vec2 = .{
-                (f64i(x) + 0.5) / scale - tx,
-                (f64i(y) + 0.5) / scale - ty,
-            };
-            var min_dist: SignedDistance = .{};
-            for (shape.contours.items) |contour| for (contour.edges.items) |*edge| {
-                const dist = edge.signedDistance(p, &dummy);
-                if (dist.lessThan(min_dist)) min_dist = dist;
-            };
-            const out = &out_pixels[row * w + x];
-            out.* = (min_dist.distance + px_range / 2.0) / px_range;
-            if (invert_pixels) out.* = 1.0 - out.*;
+            var selector: edge_selectors.TrueDistanceSelector = .init(samplePoint(x, y, scale, tx, ty));
+            edge_selectors.accumulate(&selector, shape);
+            out_pixels[row * w + x] = mapDistance(selector.distance(), px_range, invert_pixels);
         }
     }
 }
@@ -790,105 +793,44 @@ fn generatePsdf(out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px_
     for (0..h) |y| {
         const row = h - y - 1;
         for (0..w) |x| {
-            const p: Vec2 = .{
-                (f64i(x) + 0.5) / scale - tx,
-                (f64i(y) + 0.5) / scale - ty,
-            };
-            var min_dist: SignedDistance = .{};
-            var near_edge: ?*EdgeSegment = null;
-            var near_param: f64 = 0;
-            for (shape.contours.items) |contour| for (contour.edges.items) |*edge| {
-                var param: f64 = 0;
-                const dist = edge.signedDistance(p, &param);
-                if (dist.lessThan(min_dist)) {
-                    min_dist = dist;
-                    near_edge = edge;
-                    near_param = param;
-                }
-            };
-            if (near_edge) |edge| edge.distanceToPerpendicularDistance(&min_dist, p, near_param);
-            const out = &out_pixels[row * w + x];
-            out.* = (min_dist.distance + px_range / 2.0) / px_range;
-            if (invert_pixels) out.* = 1.0 - out.*;
+            var selector: edge_selectors.PerpendicularDistanceSelector = .init(samplePoint(x, y, scale, tx, ty));
+            edge_selectors.accumulate(&selector, shape);
+            out_pixels[row * w + x] = mapDistance(selector.distance(), px_range, invert_pixels);
         }
     }
 }
 
 fn generateMsdf(out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px_range: f64, tx: f64, ty: f64, invert_pixels: bool) void {
+    const channels = 3;
     for (0..h) |y| {
         const row = h - y - 1;
         for (0..w) |x| {
-            const p: Vec2 = .{
-                (f64i(x) + 0.5) / scale - tx,
-                (f64i(y) + 0.5) / scale - ty,
-            };
-            var rgb: [3]PsdfData = @splat(.{});
-            for (shape.contours.items) |contour| for (contour.edges.items) |*edge| {
-                var param: f64 = 0;
-                const dist = edge.signedDistance(p, &param);
-                inline for (.{
-                    .{ .color = EdgeColor.red, .target = &rgb[0] },
-                    .{ .color = EdgeColor.green, .target = &rgb[1] },
-                    .{ .color = EdgeColor.blue, .target = &rgb[2] },
-                }) |color_map|
-                    if ((@intFromEnum(edge.color) & @intFromEnum(color_map.color)) != 0 and dist.lessThan(color_map.target.min_dist)) {
-                        color_map.target.min_dist = dist;
-                        color_map.target.near_edge = edge;
-                        color_map.target.near_param = param;
-                    };
-            };
-            for (&rgb) |*target|
-                if (target.near_edge) |edge| edge.distanceToPerpendicularDistance(&target.min_dist, p, target.near_param);
+            var selector: edge_selectors.MultiDistanceSelector = .init(samplePoint(x, y, scale, tx, ty));
+            edge_selectors.accumulate(&selector, shape);
+            const md = selector.distance();
 
-            const channels = 3;
-            const sc_w = w * channels;
-            const sc_x = x * channels;
-            for (out_pixels[row * sc_w + sc_x ..][0..3], 0..) |*v, i| {
-                const dist = (rgb[i].min_dist.distance + px_range / 2.0) / px_range;
-                v.* = if (invert_pixels) 1.0 - dist else dist;
-            }
+            const out = out_pixels[row * w * channels + x * channels ..][0..3];
+            out[0] = mapDistance(md.r, px_range, invert_pixels);
+            out[1] = mapDistance(md.g, px_range, invert_pixels);
+            out[2] = mapDistance(md.b, px_range, invert_pixels);
         }
     }
 }
 
 fn generateMtsdf(out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px_range: f64, tx: f64, ty: f64, invert_pixels: bool) void {
+    const channels = 4;
     for (0..h) |y| {
         const row = h - y - 1;
         for (0..w) |x| {
-            const p: Vec2 = .{
-                (f64i(x) + 0.5) / scale - tx,
-                (f64i(y) + 0.5) / scale - ty,
-            };
-            var rgb: [3]PsdfData = @splat(.{});
-            var min_dist: SignedDistance = .{};
-            for (shape.contours.items) |contour| for (contour.edges.items) |*edge| {
-                var param: f64 = 0;
-                const dist = edge.signedDistance(p, &param);
-                if (dist.lessThan(min_dist)) min_dist = dist;
-                inline for (.{
-                    .{ .color = EdgeColor.red, .target = &rgb[0] },
-                    .{ .color = EdgeColor.green, .target = &rgb[1] },
-                    .{ .color = EdgeColor.blue, .target = &rgb[2] },
-                }) |color_map|
-                    if ((@intFromEnum(edge.color) & @intFromEnum(color_map.color)) != 0 and dist.lessThan(color_map.target.min_dist)) {
-                        color_map.target.min_dist = dist;
-                        color_map.target.near_edge = edge;
-                        color_map.target.near_param = param;
-                    };
-            };
-            for (&rgb) |*target|
-                if (target.near_edge) |edge| edge.distanceToPerpendicularDistance(&target.min_dist, p, target.near_param);
+            var selector: edge_selectors.MultiDistanceSelector = .init(samplePoint(x, y, scale, tx, ty));
+            edge_selectors.accumulate(&selector, shape);
+            const mtd = selector.multiAndTrueDistance();
 
-            const channels = 4;
-            const sc_w = w * channels;
-            const sc_x = x * channels;
-            const out = out_pixels[row * sc_w + sc_x ..];
-            for (out[0..3], 0..) |*v, i| {
-                const dist = (rgb[i].min_dist.distance + px_range / 2.0) / px_range;
-                v.* = if (invert_pixels) 1.0 - dist else dist;
-            }
-            const true_dist = (min_dist.distance + px_range / 2.0) / px_range;
-            out[3] = if (invert_pixels) 1.0 - true_dist else true_dist;
+            const out = out_pixels[row * w * channels + x * channels ..][0..4];
+            out[0] = mapDistance(mtd.r, px_range, invert_pixels);
+            out[1] = mapDistance(mtd.g, px_range, invert_pixels);
+            out[2] = mapDistance(mtd.b, px_range, invert_pixels);
+            out[3] = mapDistance(mtd.a, px_range, invert_pixels);
         }
     }
 }

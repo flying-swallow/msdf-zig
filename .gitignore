@@ -1,3 +1,6 @@
 .zig-cache
 zig-out
 zig-pkg
+
+# Images written by the example
+example/*.png
