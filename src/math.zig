@@ -2,6 +2,10 @@ const std = @import("std");
 
 const Vec2 = @Vector(2, f64);
 
+pub fn f64i(int: anytype) f64 {
+    return @floatFromInt(int);
+}
+
 pub fn lengthSqr(vec: Vec2) f64 {
     return @mulAdd(f64, vec[0], vec[0], vec[1] * vec[1]);
 }

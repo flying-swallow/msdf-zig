@@ -22,7 +22,7 @@ pub fn bound(self: Contour, l: *f64, b: *f64, r: *f64, t: *f64) void {
 
 pub fn boundMiters(self: Contour, l: *f64, b: *f64, r: *f64, t: *f64, border: f64, miter_limit: f64, polarity: i32) void {
     if (self.edges.items.len == 0) return;
-    var prev_dir = math.normal(self.edges.getLast().direction(1), false);
+    var prev_dir = math.normal(self.edges.getLast().?.direction(1), false);
     for (self.edges.items) |edge| {
         const dir = math.normal(edge.direction(0), false) * math.v2(-1.0);
         if (@as(f64, @floatFromInt(polarity)) * math.cross(prev_dir, dir) >= 0) {

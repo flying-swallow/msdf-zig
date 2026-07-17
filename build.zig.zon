@@ -11,10 +11,14 @@
     },
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        .mach_freetype = .{ .path = "libs/mach-freetype" },
+        // Both lazy: only the FreeType font frontend needs them, so a consumer that builds the
+        // `msdf-core` module (or passes `.font = false`) never fetches FreeType or turbopack. The
+        // font path pulls them via `b.lazyDependency` in build.zig.
+        .mach_freetype = .{ .path = "libs/mach-freetype", .lazy = true },
         .turbopack = .{
             .url = "git+https://github.com/flut2/turbopack.git#90cc3da6bd6f4d5da142651b861a1c6834f3af9c",
             .hash = "turbopack-1.0.0-rSxRjkcfAADwwnU2F77B91vY6wttplFZNVmhDG-mDeUi",
+            .lazy = true,
         },
     },
 }

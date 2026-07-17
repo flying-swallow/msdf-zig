@@ -4,7 +4,7 @@ const EdgeColor = @import("edge_color.zig").EdgeColor;
 const edge_selectors = @import("edge_selectors.zig");
 const EdgeSegment = @import("EdgeSegment.zig");
 const equations = @import("equations.zig");
-const f64i = @import("Generator.zig").f64i;
+const f64i = @import("math.zig").f64i;
 const math = @import("math.zig");
 const Shape = @import("Shape.zig");
 const SignedDistance = @import("SignedDistance.zig");
@@ -126,7 +126,7 @@ pub fn protectCorners(self: *ErrorCorrection, shape: *Shape, scale: f64, vtx: Ve
     for (shape.contours.items) |contour| {
         if (contour.edges.items.len == 0) continue;
 
-        var prev_edge = contour.edges.getLast();
+        var prev_edge = contour.edges.getLast().?;
         for (contour.edges.items) |edge| {
             // Widened to i32 to match the C++: at commonColor 0 this relies on
             // 0 & -1 == 0, which a u8 would trap on instead.

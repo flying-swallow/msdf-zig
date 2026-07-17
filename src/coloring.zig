@@ -35,7 +35,7 @@ pub fn colorShape(allocator: std.mem.Allocator, shape: *Shape, angle_threshold: 
 
         // Identify corners
         corners.clearRetainingCapacity();
-        var prev_dir = contour.edges.getLast().direction(1);
+        var prev_dir = contour.edges.getLast().?.direction(1);
         for (contour.edges.items, 0..) |edge, i| {
             if (isCorner(math.normal(prev_dir, true), math.normal(edge.direction(0), true), cross_threshold))
                 try corners.append(allocator, @intCast(i));
