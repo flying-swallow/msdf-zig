@@ -2,6 +2,21 @@ const std = @import("std");
 
 const Vec2 = @Vector(2, f64);
 
+// Cubic Bezier and its first two derivatives, in the (qa, ab, br, as) basis the
+// distance search works in: qa = p0-origin, ab = p1-p0, br = p2-p1-ab,
+// as = (p3-p2)-(p2-p1)-br.
+pub fn cubicPoint(qa: Vec2, ab: Vec2, br: Vec2, as: Vec2, t: f64) Vec2 {
+    return qa + ab * v2(3.0 * t) + br * v2(3.0 * t * t) + as * v2(t * t * t);
+}
+
+pub fn cubicDerivative(ab: Vec2, br: Vec2, as: Vec2, t: f64) Vec2 {
+    return ab * v2(3.0) + br * v2(6.0 * t) + as * v2(3.0 * t * t);
+}
+
+pub fn cubicDerivative2(br: Vec2, as: Vec2, t: f64) Vec2 {
+    return br * v2(6.0) + as * v2(6.0 * t);
+}
+
 pub fn f64i(int: anytype) f64 {
     return @floatFromInt(int);
 }

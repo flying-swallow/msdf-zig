@@ -16,20 +16,6 @@ const EdgeSegment = @This();
 const cubic_starts = 4;
 const cubic_steps = 4;
 
-// Cubic Bezier and its first two derivatives, in the (qa, ab, br, as) basis the
-// distance search works in: qa = p0-origin, ab = p1-p0, br = p2-p1-ab,
-// as = (p3-p2)-(p2-p1)-br.
-fn cubicPoint(qa: Vec2, ab: Vec2, br: Vec2, as: Vec2, t: f64) Vec2 {
-    return qa + ab * v2(3.0 * t) + br * v2(3.0 * t * t) + as * v2(t * t * t);
-}
-
-fn cubicDerivative(ab: Vec2, br: Vec2, as: Vec2, t: f64) Vec2 {
-    return ab * v2(3.0) + br * v2(6.0 * t) + as * v2(3.0 * t * t);
-}
-
-fn cubicDerivative2(br: Vec2, as: Vec2, t: f64) Vec2 {
-    return br * v2(6.0) + as * v2(6.0 * t);
-}
 
 color: EdgeColor = .white,
 segment: union(enum) {
@@ -259,19 +245,19 @@ pub fn signedDistance(self: EdgeSegment, origin: Vec2) struct { f64, SignedDista
             for (0..cubic_starts + 1) |i| {
                 const fi: f64 = @floatFromInt(i);
                 var t = fi / cubic_starts;
-                var qe = cubicPoint(qa, ab, br, as, t);
-                var d1 = cubicDerivative(ab, br, as, t);
-                var d2 = cubicDerivative2(br, as, t);
+                var qe = math.cubicPoint(qa, ab, br, as, t);
+                var d1 = math.cubicDerivative(ab, br, as, t);
+                var d2 = math.cubicDerivative2(br, as, t);
                 var improved_t = t - dot(qe, d1) / (dot(d1, d1) + dot(qe, d2));
                 if (improved_t > 0 and improved_t < 1) {
                     var remaining_steps: u32 = cubic_steps;
                     while (true) {
                         t = improved_t;
-                        qe = cubicPoint(qa, ab, br, as, t);
-                        d1 = cubicDerivative(ab, br, as, t);
+                        qe = math.cubicPoint(qa, ab, br, as, t);
+                        d1 = math.cubicDerivative(ab, br, as, t);
                         remaining_steps -= 1;
                         if (remaining_steps == 0) break;
-                        d2 = cubicDerivative2(br, as, t);
+                        d2 = math.cubicDerivative2(br, as, t);
                         improved_t = t - dot(qe, d1) / (dot(d1, d1) + dot(qe, d2));
                         if (!(improved_t > 0 and improved_t < 1)) break;
                     }
