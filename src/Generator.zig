@@ -263,8 +263,6 @@ pub fn generateSingle(
     if (bounds.left >= bounds.right or bounds.bottom >= bounds.top)
         bounds = .{ .left = 0, .bottom = 0, .right = 1, .top = 1 };
 
-    const translate_x = -bounds.left + px_range / 2.0;
-    const translate_y = -bounds.bottom + px_range / 2.0;
     const w: u16 = @intFromFloat((bounds.right - bounds.left + px_range) * f_px_size);
     const h: u16 = @intFromFloat((bounds.top - bounds.bottom + px_range) * f_px_size);
 
@@ -282,7 +280,18 @@ pub fn generateSingle(
             .width = w,
             .height = h,
         },
-        .pixels = try getSdfPixels(allocator, gen_opts, w, h, &shape, translate_x, translate_y, oob_point),
+        .pixels = try getSdfPixels(
+            allocator,
+            gen_opts,
+            w,
+            h,
+            &shape,
+            .{
+                bounds.left - px_range / 2.0,
+                bounds.bottom - px_range / 2.0,
+            },
+            oob_point,
+        ),
     };
 }
 
@@ -513,8 +522,6 @@ fn processAtlasCodepointInner(
     if (bounds.left >= bounds.right or bounds.bottom >= bounds.top)
         bounds = .{ .left = 0, .bottom = 0, .right = 1, .top = 1 };
 
-    const translate_x = -bounds.left + px_range / 2.0;
-    const translate_y = -bounds.bottom + px_range / 2.0;
     const glyph_w: u16 = @intFromFloat((bounds.right - bounds.left + px_range) * f_px_size);
     const glyph_h: u16 = @intFromFloat((bounds.top - bounds.bottom + px_range) * f_px_size);
 
@@ -540,7 +547,18 @@ fn processAtlasCodepointInner(
         return;
     }
 
-    rect_px.* = try getSdfPixels(allocator, gen_opts, glyph_w, glyph_h, &shape, translate_x, translate_y, oob_point);
+    rect_px.* = try getSdfPixels(
+        allocator,
+        gen_opts,
+        glyph_w,
+        glyph_h,
+        &shape,
+        .{
+            bounds.left - px_range / 2.0,
+            bounds.bottom - px_range / 2.0,
+        },
+        oob_point,
+    );
 
     const padded_w = glyph_w + padding * 2;
     const padded_h = glyph_h + padding * 2;
@@ -574,8 +592,7 @@ fn getSdfPixelsInner(
     w: u16,
     h: u16,
     shape: *Shape,
-    translate_x: f64,
-    translate_y: f64,
+    tfm: Vec2,
     oob_point: Vec2,
 ) ![]const f64 {
     const f_px_size = f64i(opts.px_size);
@@ -590,23 +607,18 @@ fn getSdfPixelsInner(
         };
     defer if (error_correction) |*ec| ec.destroy(allocator);
 
-    const mod_channels = if (opts.sdf_type == .msdf10)
-        4
-    else
-        opts.sdf_type.numChannels();
-    const pixels = try allocator.alloc(f64, @as(usize, w) * @as(usize, h) * @as(usize, mod_channels));
+    const channels = opts.sdf_type.numChannels();
+    const pixels = try allocator.alloc(
+        f64,
+        @as(usize, w) * @as(usize, h) * @as(usize, if (opts.sdf_type == .msdf10) 4 else channels),
+    );
     const invert_pixels = opts.orientation == .reverse or
-        (opts.orientation == .guess and findDistanceAt(shape.*, oob_point, px_range) > 0);
+        (opts.orientation == .guess and findDistanceAt(.sdf, shape.*, oob_point, px_range) > 0);
     switch (opts.sdf_type) {
-        .sdf => generateSdf(pixels, w, h, f_px_size, shape.*, px_range, translate_x, translate_y, invert_pixels),
-        .psdf => generatePsdf(pixels, w, h, f_px_size, shape.*, px_range, translate_x, translate_y, invert_pixels),
-        .msdf, .msdf10 => {
-            try coloring.colorShape(allocator, opts.coloring_rng_seed, shape, opts.corner_angle_threshold);
-            generateMsdf(pixels, w, h, f_px_size, shape.*, px_range, translate_x, translate_y, invert_pixels);
-        },
-        .mtsdf => {
-            try coloring.colorShape(allocator, opts.coloring_rng_seed, shape, opts.corner_angle_threshold);
-            generateMtsdf(pixels, w, h, f_px_size, shape.*, px_range, translate_x, translate_y, invert_pixels);
+        inline else => |ty| {
+            if (ty == .msdf or ty == .msdf10 or ty == .mtsdf)
+                try coloring.colorShape(allocator, opts.coloring_rng_seed, shape, opts.corner_angle_threshold);
+            generate(ty, pixels, w, h, f_px_size, shape.*, px_range, tfm, invert_pixels);
         },
     }
 
@@ -620,8 +632,7 @@ fn getSdfPixelsInner(
                     h,
                     f_px_size,
                     shape.*,
-                    translate_x,
-                    translate_y,
+                    tfm,
                     fill_rule,
                 ),
                 .msdf, .msdf10, .mtsdf => try msdfSignCorrection(
@@ -631,15 +642,14 @@ fn getSdfPixelsInner(
                     h,
                     f_px_size,
                     shape.*,
-                    translate_x,
-                    translate_y,
+                    tfm,
                     fill_rule,
-                    mod_channels,
+                    channels,
                 ),
             };
 
     if (error_correction) |*ec|
-        ec.correct(shape, f_px_size, px_range, translate_x, translate_y, pixels, w, h, mod_channels);
+        ec.correct(shape, f_px_size, px_range, tfm, pixels, w, h, channels);
 
     return pixels;
 }
@@ -650,8 +660,7 @@ fn getSdfPixels(
     w: u16,
     h: u16,
     shape: *Shape,
-    translate_x: f64,
-    translate_y: f64,
+    tfm: Vec2,
     oob_point: Vec2,
 ) ![]const u8 {
     const f_sdf_px = try getSdfPixelsInner(
@@ -660,8 +669,7 @@ fn getSdfPixels(
         w,
         h,
         shape,
-        translate_x,
-        translate_y,
+        tfm,
         oob_point,
     );
     defer allocator.free(f_sdf_px);
@@ -694,19 +702,18 @@ fn sdfSignCorrection(
     h: u16,
     scale: f64,
     shape: Shape,
-    tx: f64,
-    ty: f64,
+    tfm: Vec2,
     fill_rule: Scanline.FillRule,
 ) !void {
     var scanline: Scanline = .{};
     defer scanline.intersections.deinit(allocator);
     for (0..h) |y| {
         const row = h - y - 1;
-        try shape.scanline(&scanline, (f64i(y) + 0.5) / scale - ty, allocator);
+        try shape.scanline(&scanline, (f64i(y) + 0.5) / scale + tfm[1], allocator);
         for (0..w) |x| {
             const idx = row * w + x;
             const distance = out_pixels[idx];
-            if ((distance > 0.5) != scanline.filled((f64i(x) + 0.5) / scale - tx, fill_rule))
+            if ((distance > 0.5) != scanline.filled((f64i(x) + 0.5) / scale + tfm[0], fill_rule))
                 out_pixels[idx] = 1.0 - distance;
         }
     }
@@ -719,8 +726,7 @@ fn msdfSignCorrection(
     h: u16,
     scale: f64,
     shape: Shape,
-    tx: f64,
-    ty: f64,
+    tfm: Vec2,
     fill_rule: Scanline.FillRule,
     channels: u8,
 ) !void {
@@ -735,9 +741,9 @@ fn msdfSignCorrection(
     const scaled_w = w * channels;
     for (0..h) |y| {
         const row = h - y - 1;
-        try shape.scanline(&scanline, (f64i(y) + 0.5) / scale - ty, allocator);
+        try shape.scanline(&scanline, (f64i(y) + 0.5) / scale + tfm[1], allocator);
         for (0..w) |x| {
-            const filled = scanline.filled((f64i(x) + 0.5) / scale - tx, fill_rule);
+            const filled = scanline.filled((f64i(x) + 0.5) / scale + tfm[0], fill_rule);
             const idx = row * scaled_w + x * channels;
             const distance = math.median(out_pixels[idx], out_pixels[idx + 1], out_pixels[idx + 2]);
             if (distance == 0.5) {
@@ -775,138 +781,109 @@ fn msdfSignCorrection(
     }
 }
 
-fn findDistanceAt(shape: Shape, p: Vec2, px_range: f64) f64 {
-    var dummy: f64 = 0;
-    var min_dist: SignedDistance = .{};
+fn pxRangeNorm(dist: f64, px_range: f64) f64 {
+    return (dist + px_range / 2.0) / px_range;
+}
+
+pub fn findDistanceAt(
+    comptime sdf_type: SdfType,
+    shape: Shape,
+    p: Vec2,
+    px_range: f64,
+) switch (sdf_type) {
+    .sdf, .psdf => f64,
+    .msdf, .msdf10 => [3]f64,
+    .mtsdf => [4]f64,
+} {
+    var sdf_target: SignedDistance = .{};
+    var psdf_target: [if (sdf_type == .psdf) 1 else 3]PsdfData = @splat(.{});
     for (shape.contours.items) |contour| for (contour.edges.items) |*edge| {
-        const dist = edge.signedDistance(p, &dummy);
-        if (dist.lessThan(min_dist)) min_dist = dist;
+        const dist, const param = edge.signedDistance(true, p);
+
+        switch (sdf_type) {
+            .sdf, .mtsdf => {
+                if (dist.lessThan(sdf_target)) sdf_target = dist;
+            },
+            .psdf => {
+                if (dist.lessThan(psdf_target[0].min_dist)) psdf_target[0] = .{
+                    .min_dist = dist,
+                    .near_edge = edge,
+                    .near_param = param,
+                };
+            },
+            else => {},
+        }
+
+        if (sdf_type != .sdf and sdf_type != .psdf)
+            for ([_]struct { channel: EdgeColor, target: *PsdfData }{
+                .{ .channel = .red, .target = &psdf_target[0] },
+                .{ .channel = .green, .target = &psdf_target[1] },
+                .{ .channel = .blue, .target = &psdf_target[2] },
+            }) |params|
+                if (edge.color.hasChannel(params.channel) and dist.lessThan(params.target.min_dist)) {
+                    params.target.* = .{
+                        .min_dist = dist,
+                        .near_edge = edge,
+                        .near_param = param,
+                    };
+                };
     };
-    return (min_dist.distance + px_range / 2.0) / px_range;
+
+    if (sdf_type != .sdf) for (&psdf_target) |*psdf| {
+        if (psdf.near_edge) |edge|
+            edge.distanceToPerpendicularDistance(&psdf.min_dist, p, psdf.near_param);
+    };
+
+    return switch (sdf_type) {
+        .sdf => pxRangeNorm(sdf_target.distance, px_range),
+        .psdf => pxRangeNorm(psdf_target[0].min_dist.distance, px_range),
+        .msdf, .msdf10 => .{
+            pxRangeNorm(psdf_target[0].min_dist.distance, px_range),
+            pxRangeNorm(psdf_target[1].min_dist.distance, px_range),
+            pxRangeNorm(psdf_target[2].min_dist.distance, px_range),
+        },
+        .mtsdf => .{
+            pxRangeNorm(psdf_target[0].min_dist.distance, px_range),
+            pxRangeNorm(psdf_target[1].min_dist.distance, px_range),
+            pxRangeNorm(psdf_target[2].min_dist.distance, px_range),
+            pxRangeNorm(sdf_target.distance, px_range),
+        },
+    };
 }
 
-fn generateSdf(out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px_range: f64, tx: f64, ty: f64, invert_pixels: bool) void {
+fn generate(
+    comptime sdf_type: SdfType,
+    out_pixels: []f64,
+    w: u16,
+    h: u16,
+    scale: f64,
+    shape: Shape,
+    px_range: f64,
+    tfm: Vec2,
+    invert_pixels: bool,
+) void {
     for (0..h) |y| {
         const row = h - y - 1;
         for (0..w) |x| {
-            var dummy: f64 = 0;
-            const p: Vec2 = .{
-                (f64i(x) + 0.5) / scale - tx,
-                (f64i(y) + 0.5) / scale - ty,
-            };
-            var min_dist: SignedDistance = .{};
-            for (shape.contours.items) |contour| for (contour.edges.items) |*edge| {
-                const dist = edge.signedDistance(p, &dummy);
-                if (dist.lessThan(min_dist)) min_dist = dist;
-            };
-            const out = &out_pixels[row * w + x];
-            out.* = (min_dist.distance + px_range / 2.0) / px_range;
-            if (invert_pixels) out.* = 1.0 - out.*;
-        }
-    }
-}
+            const p = Vec2{
+                (f64i(x) + 0.5),
+                (f64i(y) + 0.5),
+            } / math.v2(scale) + tfm;
 
-fn generatePsdf(out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px_range: f64, tx: f64, ty: f64, invert_pixels: bool) void {
-    for (0..h) |y| {
-        const row = h - y - 1;
-        for (0..w) |x| {
-            const p: Vec2 = .{
-                (f64i(x) + 0.5) / scale - tx,
-                (f64i(y) + 0.5) / scale - ty,
-            };
-            var target: PsdfData = .{};
-            for (shape.contours.items) |contour| for (contour.edges.items) |*edge| {
-                var param: f64 = 0;
-                const dist = edge.signedDistance(p, &param);
-                if (dist.lessThan(target.min_dist)) {
-                    target.min_dist = dist;
-                    target.near_edge = edge;
-                    target.near_param = param;
-                }
-            };
-            if (target.near_edge) |edge| edge.distanceToPerpendicularDistance(&target.min_dist, p, target.near_param);
-            const out = &out_pixels[row * w + x];
-            out.* = (target.min_dist.distance + px_range / 2.0) / px_range;
-            if (invert_pixels) out.* = 1.0 - out.*;
-        }
-    }
-}
-
-fn generateMsdf(out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px_range: f64, tx: f64, ty: f64, invert_pixels: bool) void {
-    for (0..h) |y| {
-        const row = h - y - 1;
-        for (0..w) |x| {
-            const p: Vec2 = .{
-                (f64i(x) + 0.5) / scale - tx,
-                (f64i(y) + 0.5) / scale - ty,
-            };
-            var rgb: [3]PsdfData = @splat(.{});
-            for (shape.contours.items) |contour| for (contour.edges.items) |*edge| {
-                var param: f64 = 0;
-                const dist = edge.signedDistance(p, &param);
-                for ([_]struct { color: EdgeColor, target: *PsdfData }{
-                    .{ .color = .red, .target = &rgb[0] },
-                    .{ .color = .green, .target = &rgb[1] },
-                    .{ .color = .blue, .target = &rgb[2] },
-                }) |params|
-                    if ((@intFromEnum(edge.color) & @intFromEnum(params.color)) != 0 and dist.lessThan(params.target.min_dist)) {
-                        params.target.min_dist = dist;
-                        params.target.near_edge = edge;
-                        params.target.near_param = param;
-                    };
-            };
-            for (&rgb) |*target|
-                if (target.near_edge) |edge| edge.distanceToPerpendicularDistance(&target.min_dist, p, target.near_param);
-
-            const channels = 3;
-            const sc_w = w * channels;
-            const sc_x = x * channels;
-            for (out_pixels[row * sc_w + sc_x ..][0..3], 0..) |*v, i| {
-                const dist = (rgb[i].min_dist.distance + px_range / 2.0) / px_range;
-                v.* = if (invert_pixels) 1.0 - dist else dist;
+            switch (sdf_type) {
+                .sdf, .psdf => {
+                    const dist = findDistanceAt(sdf_type, shape, p, px_range);
+                    out_pixels[row * w + x] = if (invert_pixels) 1.0 - dist else dist;
+                },
+                .msdf, .msdf10, .mtsdf => {
+                    const channels = sdf_type.numChannels();
+                    for (
+                        out_pixels[row * w * channels + x * channels ..][0..channels],
+                        findDistanceAt(sdf_type, shape, p, px_range),
+                    ) |*v, dist|
+                        v.* = if (invert_pixels) 1.0 - dist else dist;
+                },
             }
-        }
-    }
-}
-
-fn generateMtsdf(out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px_range: f64, tx: f64, ty: f64, invert_pixels: bool) void {
-    for (0..h) |y| {
-        const row = h - y - 1;
-        for (0..w) |x| {
-            const p: Vec2 = .{
-                (f64i(x) + 0.5) / scale - tx,
-                (f64i(y) + 0.5) / scale - ty,
-            };
-            var rgb: [3]PsdfData = @splat(.{});
-            var min_dist: SignedDistance = .{};
-            for (shape.contours.items) |contour| for (contour.edges.items) |*edge| {
-                var param: f64 = 0;
-                const dist = edge.signedDistance(p, &param);
-                if (dist.lessThan(min_dist)) min_dist = dist;
-                for ([_]struct { color: EdgeColor, target: *PsdfData }{
-                    .{ .color = .red, .target = &rgb[0] },
-                    .{ .color = .green, .target = &rgb[1] },
-                    .{ .color = .blue, .target = &rgb[2] },
-                }) |params|
-                    if ((@intFromEnum(edge.color) & @intFromEnum(params.color)) != 0 and dist.lessThan(params.target.min_dist)) {
-                        params.target.min_dist = dist;
-                        params.target.near_edge = edge;
-                        params.target.near_param = param;
-                    };
-            };
-            for (&rgb) |*target|
-                if (target.near_edge) |edge| edge.distanceToPerpendicularDistance(&target.min_dist, p, target.near_param);
-
-            const channels = 4;
-            const sc_w = w * channels;
-            const sc_x = x * channels;
-            const out = out_pixels[row * sc_w + sc_x ..];
-            for (out[0..3], 0..) |*v, i| {
-                const dist = (rgb[i].min_dist.distance + px_range / 2.0) / px_range;
-                v.* = if (invert_pixels) 1.0 - dist else dist;
-            }
-            const true_dist = (min_dist.distance + px_range / 2.0) / px_range;
-            out[3] = if (invert_pixels) 1.0 - true_dist else true_dist;
         }
     }
 }
@@ -920,7 +897,7 @@ fn scaledFtVec(vec: [*c]const ft.Vector, scale: f64) Vec2 {
 
 fn ftMoveTo(to: [*c]const ft.Vector, ud: ?*anyopaque) callconv(.c) i32 {
     var context: *FreetypeContext = @ptrCast(@alignCast(ud));
-    if (!(context.contour != null and context.contour.?.edges.items.len == 0)) {
+    if (context.contour == null or context.contour.?.edges.items.len != 0) {
         context.contour = context.shape.contours.addOne(context.allocator) catch return ft.c.FT_Err_Out_Of_Memory;
         context.contour.?.* = .{};
     }

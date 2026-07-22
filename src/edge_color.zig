@@ -71,4 +71,13 @@ pub const EdgeColor = enum(u8) {
             },
         }
     }
+
+    pub fn hasChannel(self: EdgeColor, target_ch: EdgeColor) bool {
+        return switch (target_ch) {
+            .red => self == .magenta or self == .yellow,
+            .green => self == .cyan or self == .yellow,
+            .blue => self == .cyan or self == .magenta,
+            else => @panic("This function needs a single channel"),
+        };
+    }
 };

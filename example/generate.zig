@@ -12,7 +12,7 @@ fn printableAscii() []const u21 {
 pub fn main(init: std.process.Init) !void {
     const clock_res = try std.Io.Clock.resolution(.real, init.io);
     if (clock_res.nanoseconds == 0)
-        return error.UnsupportedClock;
+        return std.Io.Clock.ResolutionError.ClockUnavailable;
 
     stbi.init(init.gpa, init.io);
     defer stbi.deinit();

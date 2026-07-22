@@ -3,6 +3,7 @@ const std = @import("std");
 const EdgeSegment = @import("EdgeSegment.zig");
 const equations = @import("equations.zig");
 const f64i = @import("Generator.zig").f64i;
+const findDistanceAt = @import("Generator.zig").findDistanceAt;
 const math = @import("math.zig");
 const Shape = @import("Shape.zig");
 const SignedDistance = @import("SignedDistance.zig");
@@ -95,17 +96,15 @@ pub fn correct(
     shape: *Shape,
     scale: f64,
     px_range: f64,
-    tx: f64,
-    ty: f64,
+    tfm: Vec2,
     sdf_px: []f64,
     sdf_w: u16,
     sdf_h: u16,
     channels: u8,
 ) void {
-    const vtx: Vec2 = .{ tx, ty };
     switch (self.options.mode) {
         .edge_priority => {
-            self.protectCorners(shape, scale, vtx);
+            self.protectCorners(shape, scale, tfm);
             self.protectEdges(
                 px_range / scale * protection_radius_tolerance,
                 sdf_px,
@@ -120,7 +119,7 @@ pub fn correct(
         .indiscriminate => {},
     }
 
-    self.findErrors(scale, px_range, vtx, sdf_px, sdf_w, sdf_h, channels);
+    self.findErrors(scale, px_range, tfm, sdf_px, sdf_w, sdf_h, channels);
 
     for (0..sdf_w * sdf_h) |i| if (self.stencil[i].err) {
         const msdf = sdf_px[i * channels ..][0..3];
@@ -128,7 +127,7 @@ pub fn correct(
     };
 }
 
-pub fn protectCorners(self: *ErrorCorrection, shape: *Shape, scale: f64, vtx: Vec2) void {
+pub fn protectCorners(self: *ErrorCorrection, shape: *Shape, scale: f64, tfm: Vec2) void {
     for (shape.contours.items) |contour| {
         if (contour.edges.items.len == 0) continue;
 
@@ -137,7 +136,7 @@ pub fn protectCorners(self: *ErrorCorrection, shape: *Shape, scale: f64, vtx: Ve
             const common_color = @intFromEnum(prev_edge.color) & @intFromEnum(edge.color);
             prev_edge = edge;
             if ((common_color & (common_color - 1)) == 0) continue;
-            const base_point = edge.point(0) * math.v2(scale) + vtx;
+            const base_point = edge.point(0) * math.v2(scale) + tfm;
             const left: i32 = @intFromFloat(@floor(base_point[0] - 0.5));
             const bottom: i32 = @intFromFloat(f64i(self.stencil_h) - @floor(base_point[1] - 0.5) - 2.0);
             const right = left + 1;
@@ -276,23 +275,6 @@ fn rangeTest(span: f64, protected: bool, at: f64, bt: f64, xt: f64, am: f64, bm:
     };
 }
 
-fn psdfDistAt(shape: *const Shape, p: Vec2) f64 {
-    var min_dist: SignedDistance = .{};
-    var near_edge: ?*EdgeSegment = null;
-    var near_param: f64 = 0;
-    for (shape.contours.items) |contour| for (contour.edges.items) |*edge| {
-        var param: f64 = 0;
-        const dist = edge.signedDistance(p, &param);
-        if (dist.lessThan(min_dist)) {
-            min_dist = dist;
-            near_edge = edge;
-            near_param = param;
-        }
-    };
-    if (near_edge) |edge| edge.distanceToPerpendicularDistance(&min_dist, p, near_param);
-    return min_dist.distance;
-}
-
 fn evaluateArtifact(self: *const ErrorCorrection, flags: ClassifierFlags, t: f64) bool {
     if (flags.artifact) return true;
     if (!self.options.check_distance or !flags.candidate) return false;
@@ -336,11 +318,12 @@ fn evaluateArtifact(self: *const ErrorCorrection, flags: ClassifierFlags, t: f64
     };
     const om = median(&old_sdf);
     const nm = median(&new_sdf);
-    const px_range = self.dist_eval.px_range;
-    const dist = (psdfDistAt(
-        self.dist_eval.shape.?,
+    const dist = findDistanceAt(
+        .psdf,
+        self.dist_eval.shape.?.*,
         self.dist_eval.shape_coord + t_vec * self.dist_eval.texel_size,
-    ) + px_range / 2.0) / px_range;
+        self.dist_eval.px_range,
+    );
     return self.options.min_improve_ratio * @abs(nm - dist) < @abs(om - dist);
 }
 
@@ -505,7 +488,7 @@ fn findErrors(
     self: *ErrorCorrection,
     scale: f64,
     px_range: f64,
-    vtx: Vec2,
+    tfm: Vec2,
     sdf_px: []const f64,
     sdf_w: u16,
     sdf_h: u16,
@@ -533,7 +516,7 @@ fn findErrors(
         const fy: f64 = @floatFromInt(y);
         self.dist_eval.sdf = current;
         self.dist_eval.sdf_coord = .{ fx + 0.5, fy + 0.5 };
-        self.dist_eval.shape_coord = self.dist_eval.sdf_coord / vscale + vtx;
+        self.dist_eval.shape_coord = self.dist_eval.sdf_coord / vscale + tfm;
 
         if (x > 0) {
             const left = sdf_px[index(x - 1, y, sdf_w, channels)..][0..3];
