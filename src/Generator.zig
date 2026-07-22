@@ -753,10 +753,9 @@ fn msdfSignCorrection(
 }
 
 fn findDistanceAt(shape: Shape, p: Vec2, px_range: f64) f64 {
-    var dummy: f64 = 0;
     var min_dist: SignedDistance = .{};
     for (shape.contours.items) |contour| for (contour.edges.items) |*edge| {
-        const dist = edge.signedDistance(p, &dummy);
+        const dist = edge.signedDistance(p)[1];
         if (dist.lessThan(min_dist)) min_dist = dist;
     };
     return (min_dist.distance + px_range / 2.0) / px_range;

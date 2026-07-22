@@ -160,22 +160,25 @@ pub fn directionChange(self: EdgeSegment, comptime index: u1) Vec2 {
     }
 }
 
-pub fn signedDistance(self: EdgeSegment, origin: Vec2, param: *f64) SignedDistance {
+pub fn signedDistance(self: EdgeSegment, origin: Vec2) struct { f64, SignedDistance } {
     switch (self.segment) {
         .linear => |p| {
             const aq = origin - p[0];
             const ab = p[1] - p[0];
-            const new_param = dot(aq, ab) / dot(ab, ab);
-            param.* = new_param;
-            const eq = p[@intFromBool(new_param > 0.5)] - origin;
+            const param = dot(aq, ab) / dot(ab, ab);
+            const eq = p[@intFromBool(param > 0.5)] - origin;
             const endpoint_dist = math.length(eq);
-            if (new_param > 0.0 and new_param < 1.0) {
+            if (param > 0.0 and param < 1.0) {
                 const ortho_dist = dot(math.orthonormal(ab, false, true), aq);
-                if (@abs(ortho_dist) < endpoint_dist) return .{ .distance = ortho_dist };
+                if (@abs(ortho_dist) < endpoint_dist)
+                    return .{ param, .{ .distance = ortho_dist } };
             }
             return .{
-                .distance = math.nonZeroSign(cross(aq, ab)) * endpoint_dist,
-                .dot = @abs(dot(normal(ab, true), normal(eq, true))),
+                param,
+                .{
+                    .distance = math.nonZeroSign(cross(aq, ab)) * endpoint_dist,
+                    .dot = @abs(dot(normal(ab, true), normal(eq, true))),
+                },
             };
         },
         .quadratic_bezier => |p| {
@@ -191,12 +194,12 @@ pub fn signedDistance(self: EdgeSegment, origin: Vec2, param: *f64) SignedDistan
 
             var ep_dir = self.direction(0);
             var min_dist = math.nonZeroSign(cross(ep_dir, qa)) * math.length(qa);
-            param.* = -dot(qa, ep_dir) / dot(ep_dir, ep_dir);
+            var param = -dot(qa, ep_dir) / dot(ep_dir, ep_dir);
             ep_dir = self.direction(1);
             var dist = math.length(p[2] - origin);
             if (dist < @abs(min_dist)) {
                 min_dist = math.nonZeroSign(cross(ep_dir, p[2] - origin)) * dist;
-                param.* = dot(origin - p[1], ep_dir) / dot(ep_dir, ep_dir);
+                param = dot(origin - p[1], ep_dir) / dot(ep_dir, ep_dir);
             }
 
             for (roots[0..num_solutions]) |root| if (root > 0 and root < 1) {
@@ -204,27 +207,33 @@ pub fn signedDistance(self: EdgeSegment, origin: Vec2, param: *f64) SignedDistan
                 dist = math.length(qe);
                 if (dist < @abs(min_dist)) {
                     min_dist = math.nonZeroSign(cross(ab + br * v2(root), qe)) * dist;
-                    param.* = root;
+                    param = root;
                 }
             };
 
-            if (param.* < 0.0)
+            if (param < 0.0)
                 return .{
-                    .distance = min_dist,
-                    .dot = @abs(dot(
-                        normal(self.direction(0), true),
-                        normal(qa, true),
-                    )),
+                    param,
+                    .{
+                        .distance = min_dist,
+                        .dot = @abs(dot(
+                            normal(self.direction(0), true),
+                            normal(qa, true),
+                        )),
+                    },
                 }
-            else if (param.* > 1.0)
+            else if (param > 1.0)
                 return .{
-                    .distance = min_dist,
-                    .dot = @abs(dot(
-                        normal(self.direction(1), true),
-                        normal(p[2] - origin, true),
-                    )),
+                    param,
+                    .{
+                        .distance = min_dist,
+                        .dot = @abs(dot(
+                            normal(self.direction(1), true),
+                            normal(p[2] - origin, true),
+                        )),
+                    },
                 };
-            return .{ .distance = min_dist };
+            return .{ param, .{ .distance = min_dist } };
         },
         .cubic_bezier => |p| {
             const qa = p[0] - origin;
@@ -234,13 +243,13 @@ pub fn signedDistance(self: EdgeSegment, origin: Vec2, param: *f64) SignedDistan
 
             var ep_dir = self.direction(0);
             var min_dist = math.nonZeroSign(cross(ep_dir, qa)) * math.length(qa);
-            param.* = -dot(qa, ep_dir) / dot(ep_dir, ep_dir);
+            var param = -dot(qa, ep_dir) / dot(ep_dir, ep_dir);
 
             ep_dir = self.direction(1);
             var dist = math.length(p[3] - origin);
             if (dist < @abs(min_dist)) {
                 min_dist = math.nonZeroSign(cross(ep_dir, p[3] - origin)) * dist;
-                param.* = dot(ep_dir - (p[3] - origin), ep_dir) / dot(ep_dir, ep_dir);
+                param = dot(ep_dir - (p[3] - origin), ep_dir) / dot(ep_dir, ep_dir);
             }
 
             // Iterative minimum distance search. Every quantity below depends on
@@ -269,28 +278,34 @@ pub fn signedDistance(self: EdgeSegment, origin: Vec2, param: *f64) SignedDistan
                     dist = math.length(qe);
                     if (dist < @abs(min_dist)) {
                         min_dist = math.nonZeroSign(cross(d1, qe)) * dist;
-                        param.* = t;
+                        param = t;
                     }
                 }
             }
 
-            if (param.* < 0.0)
+            if (param < 0.0)
                 return .{
-                    .distance = min_dist,
-                    .dot = @abs(dot(
-                        normal(self.direction(0), true),
-                        normal(qa, true),
-                    )),
+                    param,
+                    .{
+                        .distance = min_dist,
+                        .dot = @abs(dot(
+                            normal(self.direction(0), true),
+                            normal(qa, true),
+                        )),
+                    },
                 }
-            else if (param.* > 1.0)
+            else if (param > 1.0)
                 return .{
-                    .distance = min_dist,
-                    .dot = @abs(dot(
-                        normal(self.direction(1), true),
-                        normal(p[3] - origin, true),
-                    )),
+                    param,
+                    .{
+                        .distance = min_dist,
+                        .dot = @abs(dot(
+                            normal(self.direction(1), true),
+                            normal(p[3] - origin, true),
+                        )),
+                    },
                 };
-            return .{ .distance = min_dist };
+            return .{ param, .{ .distance = min_dist } };
         },
     }
 }

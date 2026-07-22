@@ -45,8 +45,7 @@ pub const TrueDistanceSelector = struct {
     }
 
     pub fn addEdge(self: *TrueDistanceSelector, _: *const EdgeSegment, edge: *const EdgeSegment, _: *const EdgeSegment) void {
-        var dummy: f64 = 0;
-        const d = edge.signedDistance(self.p, &dummy);
+        const d = edge.signedDistance(self.p)[1];
         if (d.lessThan(self.min_distance)) self.min_distance = d;
     }
 
@@ -154,8 +153,7 @@ pub const PerpendicularDistanceSelector = struct {
         edge: *const EdgeSegment,
         next_edge: *const EdgeSegment,
     ) void {
-        var param: f64 = 0;
-        const sd = edge.signedDistance(self.p, &param);
+        const param, const sd = edge.signedDistance(self.p);
         self.base.addEdgeTrueDistance(edge, sd, param);
 
         const d = domainDistances(self.p, prev_edge, edge, next_edge);
@@ -192,8 +190,7 @@ pub const MultiDistanceSelector = struct {
         next_edge: *const EdgeSegment,
     ) void {
         const color = @intFromEnum(edge.color);
-        var param: f64 = 0;
-        const sd = edge.signedDistance(self.p, &param);
+        const param, const sd = edge.signedDistance(self.p);
         if (color & red != 0) self.r.addEdgeTrueDistance(edge, sd, param);
         if (color & green != 0) self.g.addEdgeTrueDistance(edge, sd, param);
         if (color & blue != 0) self.b.addEdgeTrueDistance(edge, sd, param);
