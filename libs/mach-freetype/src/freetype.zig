@@ -1,17 +1,9 @@
 const std = @import("std");
 
-pub const c = @cImport({
-    @cInclude("freetype/ftadvanc.h");
-    @cInclude("freetype/ftbbox.h");
-    @cInclude("freetype/ftbitmap.h");
-    @cInclude("freetype/ftcolor.h");
-    @cInclude("freetype/ftlcdfil.h");
-    @cInclude("freetype/ftsizes.h");
-    @cInclude("freetype/ftstroke.h");
-    @cInclude("freetype/fttrigon.h");
-    @cInclude("freetype/ftsynth.h");
-    @cInclude("freetype/ftmm.h");
-});
+// `@cImport` was removed as a builtin in recent Zig; C headers are now translated by the
+// build system's translate-c step and exposed here as the "c" module (see build.zig, which
+// feeds it the FreeType headers listed in src/c.h).
+pub const c = @import("c");
 
 pub const Affine23 = c.FT_Affine23;
 pub const BBox = c.FT_BBox;

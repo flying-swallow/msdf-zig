@@ -82,24 +82,27 @@ pub fn create(p0: Vec2, p1: Vec2, point_2: ?Vec2, point_3: ?Vec2, color: EdgeCol
     return createLinear(p0, p1, color);
 }
 
-pub fn distanceToPerpendicularDistance(self: EdgeSegment, distance: *SignedDistance, origin: Vec2, param: f64) void {
+pub fn distanceToPerpendicularDistance(self: EdgeSegment, distance: SignedDistance, origin: Vec2, param: f64) ?SignedDistance {
     if (param < 0) {
         const dir = normal(self.direction(0), true);
         const aq = origin - self.point(0);
         if (dot(aq, dir) < 0) {
             const perp_dist = cross(aq, dir);
-            if (@abs(perp_dist) <= @abs(distance.distance))
-                distance.* = .{ .distance = perp_dist };
+            if (@abs(perp_dist) <= @abs(distance.distance)) {
+                return SignedDistance { .distance = perp_dist };
+            }
         }
     } else if (param > 1) {
         const dir = normal(self.direction(1), true);
         const bq = origin - self.point(1);
         if (dot(bq, dir) > 0) {
             const perp_dist = cross(bq, dir);
-            if (@abs(perp_dist) <= @abs(distance.distance))
-                distance.* = .{ .distance = perp_dist };
+            if (@abs(perp_dist) <= @abs(distance.distance)) {
+                return SignedDistance { .distance = perp_dist };
+            }
         }
     }
+    return null;
 }
 
 pub fn point(self: EdgeSegment, param: f64) Vec2 {

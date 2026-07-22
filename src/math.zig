@@ -73,6 +73,19 @@ pub fn mix(a: anytype, b: anytype, t: anytype) @TypeOf(a, b) {
     }
 }
 
+/// Perpendicular distance from the edge's supporting line, valid only ahead of
+/// the endpoint (`ts > 0`). Returns null when it does not improve on `dist`.
+pub fn perpendicularDistance(dist: f64, ep: Vec2, edge_dir: Vec2) ?f64 {
+    const ts = dot(ep, edge_dir);
+    if (ts > 0) {
+        const perpendicular = cross(ep, edge_dir);
+        if (@abs(perpendicular) < @abs(dist)) {
+            return perpendicular;
+        }
+    }
+    return null;
+}
+
 pub fn boolSign(b: bool) i2 {
     return @intCast(@as(i3, @intFromBool(b)) * 2 - 1);
 }

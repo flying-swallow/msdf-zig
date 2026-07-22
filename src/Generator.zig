@@ -235,7 +235,7 @@ pub fn generateSingle(
         &context,
     ));
 
-    if (shape.contours.items.len != 0 and shape.contours.getLast().edges.items.len == 0)
+    if (shape.contours.items.len != 0 and shape.contours.getLast().?.edges.items.len == 0)
         _ = shape.contours.orderedRemove(shape.contours.items.len - 1);
 
     if (!shape.validate()) return error.InvalidShape;

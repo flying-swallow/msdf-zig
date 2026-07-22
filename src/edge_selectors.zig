@@ -66,21 +66,6 @@ pub const PerpendicularDistanceSelectorBase = struct {
     near_edge: ?*const EdgeSegment = null,
     near_edge_param: f64 = 0,
 
-    /// Perpendicular distance from the edge's supporting line, valid only ahead
-    /// of the endpoint (`ts > 0`). Returns false, leaving `dist` untouched, when
-    /// it does not improve on what is already there.
-    pub fn getPerpendicularDistance(dist: *f64, ep: Vec2, edge_dir: Vec2) bool {
-        const ts = math.dot(ep, edge_dir);
-        if (ts > 0) {
-            const perpendicular = math.cross(ep, edge_dir);
-            if (@abs(perpendicular) < @abs(dist.*)) {
-                dist.* = perpendicular;
-                return true;
-            }
-        }
-        return false;
-    }
-
     pub fn addEdgeTrueDistance(
         self: *PerpendicularDistanceSelectorBase,
         edge: *const EdgeSegment,
@@ -107,8 +92,10 @@ pub const PerpendicularDistanceSelectorBase = struct {
         else
             self.min_positive_perpendicular_distance;
         if (self.near_edge) |edge| {
-            var distance = self.min_true_distance;
-            edge.distanceToPerpendicularDistance(&distance, p, self.near_edge_param);
+            // A null result means no perpendicular improvement, so the true
+            // distance still competes — matching msdfgen, which leaves `distance`
+            // as min_true_distance in that case.
+            const distance = edge.distanceToPerpendicularDistance(self.min_true_distance, p, self.near_edge_param) orelse self.min_true_distance;
             if (@abs(distance.distance) < @abs(min_distance)) min_distance = distance.distance;
         }
         return min_distance;
@@ -173,13 +160,11 @@ pub const PerpendicularDistanceSelector = struct {
 
         const d = domainDistances(self.p, prev_edge, edge, next_edge);
         if (d.a > 0) {
-            var pd = sd.distance;
-            if (PerpendicularDistanceSelectorBase.getPerpendicularDistance(&pd, d.ap, -d.a_dir))
+            if (math.perpendicularDistance(sd.distance, d.ap, -d.a_dir)) |pd|
                 self.base.addEdgePerpendicularDistance(-pd);
         }
         if (d.b > 0) {
-            var pd = sd.distance;
-            if (PerpendicularDistanceSelectorBase.getPerpendicularDistance(&pd, d.bp, d.b_dir))
+            if (math.perpendicularDistance(sd.distance, d.bp, d.b_dir)) |pd|
                 self.base.addEdgePerpendicularDistance(pd);
         }
     }
@@ -215,8 +200,7 @@ pub const MultiDistanceSelector = struct {
 
         const d = domainDistances(self.p, prev_edge, edge, next_edge);
         if (d.a > 0) {
-            var pd = sd.distance;
-            if (PerpendicularDistanceSelectorBase.getPerpendicularDistance(&pd, d.ap, -d.a_dir)) {
+            if (math.perpendicularDistance(sd.distance, d.ap, -d.a_dir)) |pd| {
                 const npd = -pd;
                 if (color & red != 0) self.r.addEdgePerpendicularDistance(npd);
                 if (color & green != 0) self.g.addEdgePerpendicularDistance(npd);
@@ -224,8 +208,7 @@ pub const MultiDistanceSelector = struct {
             }
         }
         if (d.b > 0) {
-            var pd = sd.distance;
-            if (PerpendicularDistanceSelectorBase.getPerpendicularDistance(&pd, d.bp, d.b_dir)) {
+            if (math.perpendicularDistance(sd.distance, d.bp, d.b_dir)) |pd| {
                 if (color & red != 0) self.r.addEdgePerpendicularDistance(pd);
                 if (color & green != 0) self.g.addEdgePerpendicularDistance(pd);
                 if (color & blue != 0) self.b.addEdgePerpendicularDistance(pd);
