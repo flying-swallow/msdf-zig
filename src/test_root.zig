@@ -8,4 +8,5 @@ test {
     _ = @import("convergent_curve_ordering.zig");
     _ = @import("edge_color.zig");
     _ = @import("pixel_conversion.zig");
+    _ = @import("math.zig");
 }
