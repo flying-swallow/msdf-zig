@@ -118,23 +118,26 @@ pub fn v2(scalar: anytype) Vec2 {
     return @splat(scalar);
 }
 
-pub fn solveQuadratic(a: f64, b: f64, c: f64) struct { u8, [2]f64 } {
+pub const QuadraticRoots = struct { num: u8, solutions: [2]f64 };
+pub const CubicRoots = struct { num: u8, solutions: [3]f64 };
+
+pub fn solveQuadratic(a: f64, b: f64, c: f64) QuadraticRoots {
     if (a == 0 or @abs(b) > 1e12 * @abs(a)) {
-        if (b == 0) return .{ 0, .{ 0, 0 } };
-        return .{ 1, .{ -c / b, 0 } };
+        if (b == 0) return .{ .num = 0, .solutions = .{ 0, 0 } };
+        return .{ .num = 1, .solutions = .{ -c / b, 0 } };
     }
     const dscr = b * b - 4.0 * a * c;
     if (dscr > 0) {
         const dscr_sqrt = @sqrt(dscr);
-        return .{ 2, .{ (-b + dscr_sqrt) / (2 * a), (-b - dscr_sqrt) / (2 * a) } };
+        return .{ .num = 2, .solutions = .{ (-b + dscr_sqrt) / (2 * a), (-b - dscr_sqrt) / (2 * a) } };
     } else if (dscr == 0) {
-        return .{ 1, .{ -b / (2 * a), 0 } };
+        return .{ .num = 1, .solutions = .{ -b / (2 * a), 0 } };
     } else {
-        return .{ 0, .{ 0, 0 } };
+        return .{ .num = 0, .solutions = .{ 0, 0 } };
     }
 }
 
-fn solveCubicNormed(a: f64, b: f64, c: f64) struct { u8, [3]f64 } {
+fn solveCubicNormed(a: f64, b: f64, c: f64) CubicRoots {
     const a2 = a * a;
     var q = 1.0 / 9.0 * (a2 - 3 * b);
     const r = 1.0 / 54.0 * (a * (2 * a2 - 9 * b) + 27 * c);
@@ -148,25 +151,25 @@ fn solveCubicNormed(a: f64, b: f64, c: f64) struct { u8, [3]f64 } {
         if (t > 1) t = 1;
         t = std.math.acos(t);
         q = -2 * @sqrt(q);
-        return .{ 3, .{ q * @cos(one_third * t) - mod_a, q * @cos(one_third * (t + 2 * std.math.pi)) - mod_a, q * @cos(one_third * (t - 2 * std.math.pi)) - mod_a } };
+        return .{ .num = 3, .solutions = .{ q * @cos(one_third * t) - mod_a, q * @cos(one_third * (t + 2 * std.math.pi)) - mod_a, q * @cos(one_third * (t - 2 * std.math.pi)) - mod_a } };
     } else {
         const u = @as(f64, (if (r < 0) 1.0 else -1.0)) * std.math.pow(f64, @abs(r) + @sqrt(r2 - q3), one_third);
         const v = if (u == 0) 0 else q / u;
         if (u == v or @abs(u - v) < 1e-12 * @abs(u + v)) {
-            return .{ 2, .{ (u + v) - mod_a, -0.5 * (u + v) - mod_a, 0.0 } };
+            return .{ .num = 2, .solutions = .{ (u + v) - mod_a, -0.5 * (u + v) - mod_a, 0.0 } };
         }
-        return .{ 1, .{ (u + v) - mod_a, 0.0, 0.0 } };
+        return .{ .num = 1, .solutions = .{ (u + v) - mod_a, 0.0, 0.0 } };
     }
 }
 
-pub fn solveCubic(a: f64, b: f64, c: f64, d: f64) struct { u8, [3]f64 } {
+pub fn solveCubic(a: f64, b: f64, c: f64, d: f64) CubicRoots {
     if (a != 0) {
         const bn = b / a;
         if (@abs(bn) < 1e6) return solveCubicNormed(bn, c / a, d / a);
     }
 
     const quad_res = solveQuadratic(b, c, d);
-    return .{ quad_res.@"0", .{ quad_res.@"1"[0], quad_res.@"1"[1], 0.0 } };
+    return .{ .num = quad_res.num, .solutions = .{ quad_res.solutions[0], quad_res.solutions[1], 0.0 } };
 }
 
 fn hasRoot(roots: []const f64, count: u8, expected: f64, tolerance: f64) bool {
@@ -180,60 +183,60 @@ fn hasRoot(roots: []const f64, count: u8, expected: f64, tolerance: f64) bool {
 test "solveQuadratic: 2 real roots" {
     // x^2 - 3x + 2 = 0 -> roots: 2, 1
     const res = solveQuadratic(1.0, -3.0, 2.0);
-    try std.testing.expectEqual(@as(u8, 2), res.@"0");
-    try std.testing.expect(hasRoot(&res.@"1", res.@"0", 2.0, 1e-6));
-    try std.testing.expect(hasRoot(&res.@"1", res.@"0", 1.0, 1e-6));
+    try std.testing.expectEqual(@as(u8, 2), res.num);
+    try std.testing.expect(hasRoot(&res.solutions, res.num, 2.0, 1e-6));
+    try std.testing.expect(hasRoot(&res.solutions, res.num, 1.0, 1e-6));
 }
 
 test "solveQuadratic: 1 double root" {
     // x^2 - 2x + 1 = 0 -> root: 1
     const res = solveQuadratic(1.0, -2.0, 1.0);
-    try std.testing.expectEqual(@as(u8, 1), res.@"0");
-    try std.testing.expectApproxEqAbs(@as(f64, 1.0), res.@"1"[0], 1e-6);
+    try std.testing.expectEqual(@as(u8, 1), res.num);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), res.solutions[0], 1e-6);
 }
 
 test "solveQuadratic: 0 real roots" {
     // x^2 + 1 = 0 -> no real roots
     const res = solveQuadratic(1.0, 0.0, 1.0);
-    try std.testing.expectEqual(@as(u8, 0), res.@"0");
+    try std.testing.expectEqual(@as(u8, 0), res.num);
 }
 
 test "solveQuadratic: degenerate to linear" {
     // 0x^2 + 2x - 4 = 0 -> root: 2
     const res = solveQuadratic(0.0, 2.0, -4.0);
-    try std.testing.expectEqual(@as(u8, 1), res.@"0");
-    try std.testing.expectApproxEqAbs(@as(f64, 2.0), res.@"1"[0], 1e-6);
+    try std.testing.expectEqual(@as(u8, 1), res.num);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.0), res.solutions[0], 1e-6);
 }
 
 test "solveCubic: 3 real distinct roots" {
     // x^3 - 6x^2 + 11x - 6 = 0 -> roots: 1, 2, 3
     const res = solveCubic(1.0, -6.0, 11.0, -6.0);
-    try std.testing.expectEqual(@as(u8, 3), res.@"0");
-    try std.testing.expect(hasRoot(&res.@"1", res.@"0", 1.0, 1e-6));
-    try std.testing.expect(hasRoot(&res.@"1", res.@"0", 2.0, 1e-6));
-    try std.testing.expect(hasRoot(&res.@"1", res.@"0", 3.0, 1e-6));
+    try std.testing.expectEqual(@as(u8, 3), res.num);
+    try std.testing.expect(hasRoot(&res.solutions, res.num, 1.0, 1e-6));
+    try std.testing.expect(hasRoot(&res.solutions, res.num, 2.0, 1e-6));
+    try std.testing.expect(hasRoot(&res.solutions, res.num, 3.0, 1e-6));
 }
 
 test "solveCubic: 1 real root, 2 complex" {
     // x^3 - x^2 + x - 1 = 0 -> root: 1
     // (factored: (x-1)(x^2+1) = 0)
     const res = solveCubic(1.0, -1.0, 1.0, -1.0);
-    try std.testing.expectEqual(@as(u8, 1), res.@"0");
-    try std.testing.expect(hasRoot(&res.@"1", res.@"0", 1.0, 1e-6));
+    try std.testing.expectEqual(@as(u8, 1), res.num);
+    try std.testing.expect(hasRoot(&res.solutions, res.num, 1.0, 1e-6));
 }
 
 test "solveCubic: 2 real roots (1 distinct, 1 double)" {
     // x^3 - 3x + 2 = 0 -> roots: 1 (double), -2
     const res = solveCubic(1.0, 0.0, -3.0, 2.0);
-    try std.testing.expectEqual(@as(u8, 2), res.@"0");
-    try std.testing.expect(hasRoot(&res.@"1", res.@"0", 1.0, 1e-6));
-    try std.testing.expect(hasRoot(&res.@"1", res.@"0", -2.0, 1e-6));
+    try std.testing.expectEqual(@as(u8, 2), res.num);
+    try std.testing.expect(hasRoot(&res.solutions, res.num, 1.0, 1e-6));
+    try std.testing.expect(hasRoot(&res.solutions, res.num, -2.0, 1e-6));
 }
 
 test "solveCubic: degenerate to quadratic" {
     // 0x^3 + x^2 - 5x + 6 = 0 -> roots: 2, 3
     const res = solveCubic(0.0, 1.0, -5.0, 6.0);
-    try std.testing.expectEqual(@as(u8, 2), res.@"0");
-    try std.testing.expect(hasRoot(&res.@"1", res.@"0", 2.0, 1e-6));
-    try std.testing.expect(hasRoot(&res.@"1", res.@"0", 3.0, 1e-6));
+    try std.testing.expectEqual(@as(u8, 2), res.num);
+    try std.testing.expect(hasRoot(&res.solutions, res.num, 2.0, 1e-6));
+    try std.testing.expect(hasRoot(&res.solutions, res.num, 3.0, 1e-6));
 }

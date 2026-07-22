@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const EdgeColor = @import("edge_color.zig").EdgeColor;
-const equations = @import("equations.zig");
 const math = @import("math.zig");
 const mix = math.mix;
 const dot = math.dot;
@@ -175,8 +174,7 @@ pub fn signedDistance(self: EdgeSegment, origin: Vec2) struct { f64, SignedDista
             const b = 3.0 * dot(ab, br);
             const c = 2.0 * dot(ab, ab) + dot(qa, br);
             const d = dot(qa, ab);
-            var roots: [3]f64 = undefined;
-            const num_solutions = equations.solveCubic(&roots, a, b, c, d);
+            const solved = math.solveCubic(a, b, c, d);
 
             var ep_dir = self.direction(0);
             var min_dist = math.nonZeroSign(cross(ep_dir, qa)) * math.length(qa);
@@ -188,7 +186,7 @@ pub fn signedDistance(self: EdgeSegment, origin: Vec2) struct { f64, SignedDista
                 param = dot(origin - p[1], ep_dir) / dot(ep_dir, ep_dir);
             }
 
-            for (roots[0..num_solutions]) |root| if (root > 0 and root < 1) {
+            for (solved.solutions[0..solved.num]) |root| if (root > 0 and root < 1) {
                 const qe = qa + ab * v2(root * 2.0) + br * v2(root * root);
                 dist = math.length(qe);
                 if (dist < @abs(min_dist)) {
@@ -320,12 +318,11 @@ pub fn scanlineIntersections(self: EdgeSegment, x: *[3]f64, dy: *[3]i32, y: f64)
 
             const ab = p[1] - p[0];
             const br = p[2] - p[1] - ab;
-            var roots: [2]f64 = undefined;
-            const num_solutions = equations.solveQuadratic(&roots, br[1], 2 * ab[1], p[0][1] - y);
-            if (num_solutions >= 2 and roots[0] > roots[1]) std.mem.swap(f64, &roots[0], &roots[1]);
+            var solved = math.solveQuadratic(br[1], 2 * ab[1], p[0][1] - y);
+            if (solved.num >= 2 and solved.solutions[0] > solved.solutions[1]) std.mem.swap(f64, &solved.solutions[0], &solved.solutions[1]);
             // A quadratic crosses a scanline at most twice; the cap keeps an
             // endpoint-plus-two-roots case from reporting a third crossing.
-            for (roots[0..num_solutions]) |root| {
+            for (solved.solutions[0..solved.num]) |root| {
                 if (total >= 2) break;
                 if (root >= 0 and root <= 1) {
                     x[total] = p[0][0] + 2 * root * ab[0] + root * root * br[0];
@@ -378,20 +375,19 @@ pub fn scanlineIntersections(self: EdgeSegment, x: *[3]f64, dy: *[3]i32, y: f64)
             const ab = p[1] - p[0];
             const br = p[2] - p[1] - ab;
             const as = (p[3] - p[2]) - (p[2] - p[1]) - br;
-            var roots: [3]f64 = undefined;
-            const num_solutions = equations.solveCubic(&roots, as[1], 3 * br[1], 3 * ab[1], p[0][1] - y);
-            if (num_solutions >= 2) {
-                if (roots[0] > roots[1]) std.mem.swap(f64, &roots[0], &roots[1]);
+            var solved = math.solveCubic(as[1], 3 * br[1], 3 * ab[1], p[0][1] - y);
+            if (solved.num >= 2) {
+                if (solved.solutions[0] > solved.solutions[1]) std.mem.swap(f64, &solved.solutions[0], &solved.solutions[1]);
 
-                if (num_solutions >= 3 and roots[1] > roots[2]) {
-                    std.mem.swap(f64, &roots[1], &roots[2]);
-                    if (roots[0] > roots[1]) std.mem.swap(f64, &roots[0], &roots[1]);
+                if (solved.num >= 3 and solved.solutions[1] > solved.solutions[2]) {
+                    std.mem.swap(f64, &solved.solutions[1], &solved.solutions[2]);
+                    if (solved.solutions[0] > solved.solutions[1]) std.mem.swap(f64, &solved.solutions[0], &solved.solutions[1]);
                 }
             }
 
             // `total < 3` is load-bearing: x and dy are [3], and an endpoint
             // counted above plus three in-range roots would write x[3].
-            for (roots[0..num_solutions]) |root| {
+            for (solved.solutions[0..solved.num]) |root| {
                 if (total >= 3) break;
                 if (root >= 0 and root <= 1) {
                     x[total] = p[0][0] + 3 * root * ab[0] + 3 * root * root * br[0] + root * root * root * as[0];
@@ -468,11 +464,10 @@ pub fn bound(self: EdgeSegment, l: *f64, b: *f64, r: *f64, t: *f64) void {
             const a0 = p[1] - p[0];
             const a1 = (p[2] - p[1] - a0) * v2(2.0);
             const a2 = p[3] - p[2] * v2(3.0) + p[1] * v2(3.0) - p[0];
-            var roots: [2]f64 = undefined;
-            var roots_len = equations.solveQuadratic(&roots, a2[0], a1[0], a0[0]);
-            for (roots[0..roots_len]) |root| if (root > 0 and root < 1) pointBounds(self.point(root), l, b, r, t);
-            roots_len = equations.solveQuadratic(&roots, a2[1], a1[1], a0[1]);
-            for (roots[0..roots_len]) |root| if (root > 0 and root < 1) pointBounds(self.point(root), l, b, r, t);
+            var solved = math.solveQuadratic(a2[0], a1[0], a0[0]);
+            for (solved.solutions[0..solved.num]) |root| if (root > 0 and root < 1) pointBounds(self.point(root), l, b, r, t);
+            solved = math.solveQuadratic(a2[1], a1[1], a0[1]);
+            for (solved.solutions[0..solved.num]) |root| if (root > 0 and root < 1) pointBounds(self.point(root), l, b, r, t);
         },
     }
 }
