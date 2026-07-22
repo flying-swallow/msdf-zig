@@ -13,37 +13,43 @@ fn symmetricalTrichotomy(pos: usize, n: usize) i32 {
     return @as(i32, @intFromFloat(@floor(3 + 2.875 * fpos / fn1 - 1.4375 + 0.5))) - 3;
 }
 
-fn isCorner(a: Vec2, b: Vec2, cross_threshold: f64) bool {
-    return math.dot(a, b) <= 0 or @abs(math.cross(a, b)) > cross_threshold;
-}
-
-pub fn colorShape(allocator: std.mem.Allocator, shape: *Shape, angle_threshold: f64) !void {
+pub fn colorShape(
+    allocator: std.mem.Allocator,
+    rng_seed: u64,
+    shape: *Shape,
+    angle_threshold: f64,
+) !void {
     const cross_threshold = @sin(angle_threshold);
-    var color: EdgeColor = .init();
+
+    var rng: std.Random.DefaultPrng = .init(rng_seed);
+    var color: EdgeColor = .init(&rng);
+
     var corners: std.ArrayList(u32) = .empty;
     defer corners.deinit(allocator);
+
     for (shape.contours.items) |*contour| {
-        if (contour.edges.items.len == 0) continue;
+        if (contour.edges.items.len == 0)
+            continue;
 
         corners.clearRetainingCapacity();
-        var prev_dir = contour.edges.getLast().direction(1);
+        var prev_dir = math.normal(contour.edges.getLast().direction(1), true);
         for (contour.edges.items, 0..) |edge, i| {
-            if (isCorner(math.normal(prev_dir, true), math.normal(edge.direction(0), true), cross_threshold))
+            const edge_dir = math.normal(edge.direction(0), true);
+            if (math.dot(prev_dir, edge_dir) <= 0 or
+                @abs(math.cross(prev_dir, edge_dir)) > cross_threshold)
                 try corners.append(allocator, @intCast(i));
-            prev_dir = edge.direction(1);
+
+            prev_dir = math.normal(edge.direction(1), true);
         }
 
-        switch (corners.items.len) {
+        const corners_len = corners.items.len;
+        switch (corners_len) {
             0 => {
-                color.random();
+                color.random(&rng);
                 for (contour.edges.items) |*edge| edge.color = color;
             },
             1 => {
-                var colors: [3]EdgeColor = .{ .black, .white, .black };
-                inline for (.{ 0, 2 }) |i| {
-                    color.random();
-                    colors[i] = color;
-                }
+                const colors: [3]EdgeColor = .{ .init(&rng), .white, .init(&rng) };
                 const corner = corners.items[0];
                 const corner_idx = 3 * corner;
                 const edges_len = contour.edges.items.len;
@@ -62,17 +68,18 @@ pub fn colorShape(allocator: std.mem.Allocator, shape: *Shape, angle_threshold: 
                 }
             },
             else => {
-                const corners_len = corners.items.len;
-                var spline: u32 = 0;
                 const start = corners.items[0];
                 const edges_len = contour.edges.items.len;
-                color.random();
+
+                color.random(&rng);
                 const initial_color = color;
+
+                var spline: u32 = 0;
                 for (0..edges_len) |i| {
                     const idx = (start + i) % edges_len;
                     if (spline + 1 < corners_len and corners.items[spline + 1] == idx) {
                         spline += 1;
-                        color.change(if (spline == corners_len - 1) initial_color else .black);
+                        color.change(&rng, if (spline == corners_len - 1) initial_color else .black);
                     }
                     contour.edges.items[idx].color = color;
                 }

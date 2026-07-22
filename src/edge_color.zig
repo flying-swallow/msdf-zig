@@ -1,7 +1,5 @@
 const std = @import("std");
 
-pub var rng: std.Random.DefaultPrng = .init(0);
-
 pub const EdgeColor = enum(u8) {
     const len = @typeInfo(@This()).@"enum".fields.len;
 
@@ -14,7 +12,7 @@ pub const EdgeColor = enum(u8) {
     cyan = 6,
     white = 7,
 
-    pub fn init() EdgeColor {
+    pub fn init(rng: *std.Random.DefaultPrng) EdgeColor {
         const two_channel: [3]EdgeColor = .{ .cyan, .magenta, .yellow };
         return two_channel[rng.next() % two_channel.len];
     }
@@ -49,7 +47,7 @@ pub const EdgeColor = enum(u8) {
         };
     }
 
-    pub fn change(self: *EdgeColor, banned: EdgeColor) void {
+    pub fn change(self: *EdgeColor, rng: *std.Random.DefaultPrng, banned: EdgeColor) void {
         switch (self.*) {
             inline .cyan, .magenta, .yellow => |c| switch (banned) {
                 inline .cyan, .magenta, .yellow => |bc| if (comptime c != bc) {
@@ -61,10 +59,10 @@ pub const EdgeColor = enum(u8) {
             else => {},
         }
 
-        self.random();
+        self.random(rng);
     }
 
-    pub fn random(self: *EdgeColor) void {
+    pub fn random(self: *EdgeColor, rng: *std.Random.DefaultPrng) void {
         switch (self.*) {
             .black, .white => return,
             inline else => |c| {

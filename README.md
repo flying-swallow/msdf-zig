@@ -9,7 +9,7 @@ const font_data = @embedFile("OpenSans-Bold.ttf");
 var gen: Generator = try .create(font_data);
 defer gen.destroy();
 
-inline for (.{ 'A', 'B', 'C' }) |codepoint| {
+for ([_]u21{ 'A', 'B', 'C' }) |codepoint| {
     const data = try gen.generateSingle(allocator, codepoint, .{ .sdf_type = .mtsdf, .px_size = 64, .px_range = 8 });
     defer data.deinit(allocator);
     

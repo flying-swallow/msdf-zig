@@ -45,10 +45,9 @@ pub const KerningPair = struct {
 pub const AtlasGlyphData = struct {
     glyph_data: GlyphData,
     codepoint: u21,
-    tex_u: f64,
-    tex_v: f64,
-    tex_w: f64,
-    tex_h: f64,
+    /// This is the glyph's unscaled, unnormalized
+    /// bounding box on the atlas, with padding included.
+    tex_bounds: pack.Rect,
 };
 
 pub const Msdf10Pixel = packed struct(u32) {
@@ -58,33 +57,26 @@ pub const Msdf10Pixel = packed struct(u32) {
     a: u2 = std.math.maxInt(u2),
 };
 
-pub const Pixels = union(enum) {
-    normal: []const u8,
-    msdf10: []const Msdf10Pixel,
-};
-
 pub const SingleGlyphData = struct {
     glyph_data: GlyphData,
-    pixels: Pixels,
+    pixels: []const u8,
 
     pub fn deinit(self: SingleGlyphData, allocator: std.mem.Allocator) void {
-        switch (self.pixels) {
-            inline else => |inner| allocator.free(inner),
-        }
+        allocator.free(self.pixels);
     }
 };
 
 pub const AtlasData = struct {
     glyphs: []const AtlasGlyphData,
     kernings: []const KerningPair,
-    pixels: Pixels,
+    /// In case of `msdf10` you should reinterpret this as a `Msdf10Pixel` slice,
+    /// like with 10-bit ABGR GPU formats (assuming a little endian host).
+    pixels: []const u8,
 
     pub fn deinit(self: AtlasData, allocator: std.mem.Allocator) void {
         allocator.free(self.glyphs);
         allocator.free(self.kernings);
-        switch (self.pixels) {
-            inline else => |inner| allocator.free(inner),
-        }
+        allocator.free(self.pixels);
     }
 };
 
@@ -96,12 +88,10 @@ pub const SdfType = enum {
     /// Experimental: A packed BGR MSDF where each channel is 10-bit,
     /// with a 2-bit alpha channel that is ignored (set to u2 max).
     ///
-    /// Can prove useful in place of MSDFs as native `R8G8B8_X` (and equivalents)
-    /// support is scarce and 3-channel images are often padded to have an
-    /// alignment of 4 bytes per pixel on a lot of hardware, resulting in
-    /// the final byte getting wasted.
-    ///
-    /// For use with the `A2B10G10R10_UNORM_PACK32` format (and equivalents).
+    /// Can prove useful in place of MSDFs as native `R8G8B8_X` (and equivalent)
+    /// format support is scarce. Additionally, 3-channel images are often padded
+    /// to have an alignment of 4 bytes per pixel on a lot of hardware,
+    /// which results in the final byte getting wasted on such formats.
     msdf10,
 
     pub fn numChannels(self: SdfType) u8 {
@@ -134,9 +124,12 @@ pub const GenerationOptions = struct {
     geometry_preprocess: bool = false,
     /// Requires geometry preprocessing to be disabled
     scanline_fill_rule: ?Scanline.FillRule = null,
-    /// Only MSDFs and MTSDFs can be error corrected
+    /// Only MSDFs (both their normal and their 10-bit versions) and MTSDFs can be error corrected
     error_correction_opts: ?ErrorCorrection.Options = .{},
     var_font_args: []const VarFontArgument = &.{},
+    /// Whether to use async tasks over concurrent ones during atlas generation.
+    /// Currently has no effect outside of atlas generation.
+    disable_concurrency: bool = false,
 };
 
 const FreetypeContext = struct {
@@ -149,19 +142,20 @@ const FreetypeContext = struct {
 
 const PsdfData = struct {
     min_dist: SignedDistance = .{},
-    near_edge: ?*EdgeSegment = null,
+    near_edge: ?*const EdgeSegment = null,
     near_param: f64 = 0,
 };
 
-library: ft.Library = undefined,
-face: ft.Face = undefined,
+library: ft.Library,
+font_memory: []const u8,
 
-/// `font_memory` is the raw font file data
+/// `font_memory` is the raw font file data.
+/// It should be valid and available during the entire Generator lifecycle,
+/// as it's used to create new faces, since a shared one is not thread-safe.
 pub fn create(font_memory: []const u8) !Generator {
-    var library: ft.Library = try .init();
     return .{
-        .library = library,
-        .face = try library.createFaceMemory(font_memory, 0),
+        .library = try .init(),
+        .font_memory = font_memory,
     };
 }
 
@@ -170,35 +164,47 @@ pub fn destroy(self: *Generator) void {
 }
 
 pub fn fontMetrics(self: *Generator) !FontMetrics {
-    const scale = 1.0 / f64i(self.face.unitsPerEM());
+    const face = try self.library.createFaceMemory(self.font_memory, 0);
+    defer face.deinit();
+
+    const scale = 1.0 / f64i(face.unitsPerEM());
     return .{
-        .line_height = scale * f64i(self.face.height()),
-        .ascender = scale * f64i(self.face.ascender()),
-        .descender = scale * f64i(self.face.descender()),
-        .underline_y = scale * f64i(self.face.underlinePosition()),
-        .underline_thickness = scale * f64i(self.face.underlineThickness()),
+        .line_height = scale * f64i(face.height()),
+        .ascender = scale * f64i(face.ascender()),
+        .descender = scale * f64i(face.descender()),
+        .underline_y = scale * f64i(face.underlinePosition()),
+        .underline_thickness = scale * f64i(face.underlineThickness()),
     };
 }
 
-fn handleVarFont(self: *Generator, allocator: std.mem.Allocator, var_args: []const VarFontArgument, face_flags: ft.FaceFlags) !void {
+fn handleVarFont(
+    self: *Generator,
+    face: ft.Face,
+    allocator: std.mem.Allocator,
+    var_args: []const VarFontArgument,
+    face_flags: ft.FaceFlags,
+) !void {
     if (var_args.len == 0) return;
 
     if (face_flags.multiple_masters) {
-        const vf = try self.face.createVarFontInfo();
-        if (vf) |var_font| if (var_font.num_axis > 0) {
-            var coords = try allocator.alloc(ft.c.FT_Fixed, var_font.num_axis);
-            defer allocator.free(coords);
-            try self.face.getVarDesignCoords(coords);
+        std.log.warn("Var font args supplied, but the face only has a single master", .{});
+        return;
+    }
 
-            for (var_args) |args|
-                for (var_font.axis[0..var_font.num_axis], 0..) |axis, i|
-                    if (std.mem.eql(u8, std.mem.span(axis.name), args.name)) {
-                        coords[i] = @intFromFloat(std.math.maxInt(u16) * args.value);
-                    };
-            try self.face.setVarDesignCoords(coords);
-        };
-        try self.library.destroyVarFontInfo(vf);
-    } else std.log.warn("Var font args supplied, but the face only has a single master", .{});
+    const vf = try face.createVarFontInfo();
+    if (vf) |var_font| if (var_font.num_axis > 0) {
+        var coords = try allocator.alloc(ft.c.FT_Fixed, var_font.num_axis);
+        defer allocator.free(coords);
+        try face.getVarDesignCoords(coords);
+
+        for (var_args) |args|
+            for (var_font.axis[0..var_font.num_axis], 0..) |axis, i|
+                if (std.mem.eql(u8, std.mem.span(axis.name), args.name)) {
+                    coords[i] = @intFromFloat(std.math.maxInt(u16) * args.value);
+                };
+        try face.setVarDesignCoords(coords);
+    };
+    try self.library.destroyVarFontInfo(vf);
 }
 
 /// The result is under the caller's ownership (call `deinit()` or deallocate fields manually)
@@ -206,15 +212,16 @@ pub fn generateSingle(
     self: *Generator,
     allocator: std.mem.Allocator,
     codepoint: u21,
-    gen_opts: GenerationOptions,
+    gen_opts: *const GenerationOptions,
 ) !SingleGlyphData {
-    edge_color.rng.seed(gen_opts.coloring_rng_seed);
+    const face = try self.library.createFaceMemory(self.font_memory, 0);
+    defer face.deinit();
 
-    try self.handleVarFont(allocator, gen_opts.var_font_args, self.face.faceFlags());
+    try self.handleVarFont(face, allocator, gen_opts.var_font_args, face.faceFlags());
 
-    const scale = 1.0 / f64i(self.face.unitsPerEM());
-    const glyph_index = self.face.getCharIndex(codepoint) orelse return error.InvalidCodepoint;
-    try self.face.loadGlyph(glyph_index, .{ .no_scale = true, .no_bitmap = true });
+    const scale = 1.0 / f64i(face.unitsPerEM());
+    const glyph_index = face.getCharIndex(codepoint) orelse return error.InvalidCodepoint;
+    try face.loadGlyph(glyph_index, .{ .no_scale = true, .no_bitmap = true });
 
     var shape: Shape = .{};
     defer {
@@ -228,10 +235,10 @@ pub fn generateSingle(
         .shape = &shape,
     };
 
-    const outline = self.face.glyph().outline().?;
+    const outline = face.glyph().outline().?;
     try ft.intToError(ft.c.FT_Outline_Decompose(
         outline.handle,
-        &ft.c.FT_Outline_Funcs{
+        &.{
             .move_to = ftMoveTo,
             .line_to = ftLineTo,
             .conic_to = ftConicTo,
@@ -266,19 +273,16 @@ pub fn generateSingle(
     else
         undefined;
 
-    const metrics = self.face.glyph().metrics();
+    const metrics = face.glyph().metrics();
     return .{
         .glyph_data = .{
-            .advance = scale * f64i(self.face.glyph().advance().x),
+            .advance = scale * f64i(face.glyph().advance().x),
             .bearing_x = scale * f64i(metrics.horiBearingX),
             .bearing_y = scale * f64i(metrics.horiBearingY),
             .width = w,
             .height = h,
         },
-        .pixels = switch (gen_opts.sdf_type) {
-            .msdf10 => .{ .msdf10 = try getMsdf10Pixels(allocator, gen_opts, w, h, &shape, translate_x, translate_y, oob_point) },
-            else => .{ .normal = try getSdfPixels(allocator, gen_opts, w, h, &shape, translate_x, translate_y, oob_point) },
-        },
+        .pixels = try getSdfPixels(allocator, gen_opts, w, h, &shape, translate_x, translate_y, oob_point),
     };
 }
 
@@ -286,205 +290,117 @@ pub fn generateSingle(
 pub fn generateAtlas(
     self: *Generator,
     allocator: std.mem.Allocator,
+    io: std.Io,
     codepoints: []const u21,
     w: u16,
     h: u16,
     padding: u8,
     use_kerning: bool,
-    gen_opts: GenerationOptions,
+    gen_opts: *const GenerationOptions,
 ) !AtlasData {
-    edge_color.rng.seed(gen_opts.coloring_rng_seed);
+    const face = try self.library.createFaceMemory(self.font_memory, 0);
+    defer face.deinit();
 
-    const face_flags = self.face.faceFlags();
-    try self.handleVarFont(allocator, gen_opts.var_font_args, face_flags);
+    const face_flags = face.faceFlags();
+    try self.handleVarFont(face, allocator, gen_opts.var_font_args, face_flags);
 
-    const is_msdf10 = gen_opts.sdf_type == .msdf10;
-
-    const channels = gen_opts.sdf_type.numChannels();
     const glyphs = try allocator.alloc(AtlasGlyphData, codepoints.len);
     errdefer allocator.free(glyphs);
 
-    const normal_pixels: []u8 = if (is_msdf10)
-        &.{}
-    else
-        try allocator.alloc(u8, @as(u32, w) * @as(u32, h) * @as(u32, channels));
-    errdefer allocator.free(normal_pixels);
-    @memset(normal_pixels, 0);
-
-    const msdf10_pixels: []Msdf10Pixel = if (is_msdf10)
-        try allocator.alloc(Msdf10Pixel, @as(u32, w) * @as(u32, h))
-    else
-        &.{};
-    errdefer allocator.free(msdf10_pixels);
-    @memset(msdf10_pixels, .{});
-
-    var pack_ctx: pack.Context = try .create(allocator, w, h, .{});
-    defer pack_ctx.deinit();
-
     const char_indices = try allocator.alloc(u32, codepoints.len);
     defer allocator.free(char_indices);
-    for (codepoints, char_indices) |c, *i|
-        i.* = self.face.getCharIndex(c) orelse return error.InvalidCodepoint;
 
-    const scale = 1.0 / f64i(self.face.unitsPerEM());
+    for (codepoints, char_indices) |c, *i|
+        i.* = face.getCharIndex(c) orelse return error.InvalidCodepoint;
+
+    const scale = 1.0 / f64i(face.unitsPerEM());
 
     var kernings: std.ArrayList(KerningPair) = .empty;
     errdefer kernings.deinit(allocator);
+    kerning: {
+        if (!use_kerning)
+            break :kerning;
 
-    if (use_kerning) {
-        if (face_flags.kerning) {
-            for (char_indices, codepoints) |i, ci| for (char_indices, codepoints) |j, cj|
-                if (i != j) {
-                    const kern = try self.face.getKerning(i, j, .unscaled);
+        if (!face_flags.kerning) {
+            std.log.warn(
+                \\Kerning requested, but none were found in the font file.
+                \\Note: FreeType doesn't have full support for GPOS kerning, you might want to populate the kern table off of the GPOS one with a font editor if you were expecting kerning to be present.
+            , .{});
+            break :kerning;
+        }
+
+        for (char_indices, codepoints) |idx_a, codepoint_a|
+            for (char_indices, codepoints) |idx_b, codepoint_b|
+                if (idx_a != idx_b) {
+                    const kern = try face.getKerning(idx_a, idx_b, .unscaled);
                     if (kern.x != 0 or kern.y != 0)
                         try kernings.append(allocator, .{
-                            .codepoint_1 = ci,
-                            .codepoint_2 = cj,
+                            .codepoint_1 = codepoint_a,
+                            .codepoint_2 = codepoint_b,
                             .x = scale * f64i(kern.x),
                             .y = scale * f64i(kern.y),
                         });
                 };
-        } else std.log.warn(
-            \\Kerning requested, but none were found in the font file.
-            \\Note: FreeType doesn't have full support for GPOS kerning, you might want to populate the kern table off of the GPOS one with a font editor if you were expecting kerning to be present.
-        , .{});
     }
 
-    var rects: std.ArrayListUnmanaged(pack.IdRect) = try .initCapacity(allocator, codepoints.len);
-    defer rects.deinit(allocator);
+    const id_rects = try allocator.alloc(pack.IdRect, codepoints.len);
+    defer allocator.free(id_rects);
 
-    var rect_px_normal: std.AutoHashMapUnmanaged(usize, []const u8) = .empty;
-    if (!is_msdf10) try rect_px_normal.ensureTotalCapacity(allocator, @intCast(codepoints.len));
+    const rect_pixels = try allocator.alloc([]const u8, codepoints.len);
     defer {
-        var iter = rect_px_normal.valueIterator();
-        while (iter.next()) |px| allocator.free(px.*);
-        rect_px_normal.deinit(allocator);
+        for (rect_pixels) |px| allocator.free(px);
+        allocator.free(rect_pixels);
     }
+    @memset(rect_pixels, &.{});
 
-    var rect_px_msdf10: std.AutoHashMapUnmanaged(usize, []const Msdf10Pixel) = .empty;
-    if (is_msdf10) try rect_px_msdf10.ensureTotalCapacity(allocator, @intCast(codepoints.len));
-    defer {
-        var iter = rect_px_msdf10.valueIterator();
-        while (iter.next()) |px| allocator.free(px.*);
-        rect_px_msdf10.deinit(allocator);
-    }
-
-    for (codepoints, 0..) |codepoint, i| {
-        const idx = char_indices[i];
-        try self.face.loadGlyph(idx, .{ .no_scale = true, .no_bitmap = true });
-
-        var shape: Shape = .{};
-        defer {
-            for (shape.contours.items) |*contour| contour.edges.deinit(allocator);
-            shape.contours.deinit(allocator);
-        }
-
-        var context: FreetypeContext = .{
-            .allocator = allocator,
-            .scale = scale,
-            .shape = &shape,
+    var process_group: std.Io.Group = .init;
+    for (
+        codepoints,
+        glyphs,
+        char_indices,
+        id_rects,
+        rect_pixels,
+        0..,
+    ) |codepoint, *glyph, char_idx, *id_rect, *rect_px, i| {
+        id_rect.id = @intCast(i);
+        const args = .{
+            self,
+            allocator,
+            gen_opts,
+            codepoint,
+            glyph,
+            id_rect,
+            rect_px,
+            char_idx,
+            padding,
+            scale,
         };
 
-        const outline = self.face.glyph().outline().?;
-        try ft.intToError(ft.c.FT_Outline_Decompose(
-            outline.handle,
-            &ft.c.FT_Outline_Funcs{
-                .move_to = ftMoveTo,
-                .line_to = ftLineTo,
-                .conic_to = ftConicTo,
-                .cubic_to = ftCubicTo,
-                .shift = 0,
-                .delta = 0,
-            },
-            &context,
-        ));
-
-        if (shape.contours.items.len != 0 and shape.contours.getLast().edges.items.len == 0)
-            _ = shape.contours.orderedRemove(shape.contours.items.len - 1);
-
-        if (!shape.validate()) return error.InvalidShape;
-        if (gen_opts.geometry_preprocess) try shape.orientContours(allocator);
-        try shape.normalize(allocator);
-
-        const f_px_size = f64i(gen_opts.px_size);
-        const px_range = f64i(gen_opts.px_range) / f_px_size;
-
-        var bounds = shape.getBounds(0, 0, 0);
-        if (bounds.left >= bounds.right or bounds.bottom >= bounds.top)
-            bounds = .{ .left = 0, .bottom = 0, .right = 1, .top = 1 };
-
-        const translate_x = -bounds.left + px_range / 2.0;
-        const translate_y = -bounds.bottom + px_range / 2.0;
-        const glyph_w: u16 = @intFromFloat((bounds.right - bounds.left + px_range) * f_px_size);
-        const glyph_h: u16 = @intFromFloat((bounds.top - bounds.bottom + px_range) * f_px_size);
-
-        const oob_point: Vec2 = if (gen_opts.orientation == .guess)
-            .{ bounds.left - (bounds.right - bounds.left) - 1, bounds.bottom - (bounds.top - bounds.bottom) - 1 }
+        if (gen_opts.disable_concurrency)
+            process_group.async(io, processAtlasCodepoint, args)
         else
-            undefined;
-
-        const metrics = self.face.glyph().metrics();
-        if (codepoint == ' ' or glyph_w == 0 or glyph_h == 0) {
-            glyphs[i] = .{
-                .glyph_data = .{
-                    .advance = scale * f64i(self.face.glyph().advance().x),
-                    .bearing_x = scale * f64i(metrics.horiBearingX),
-                    .bearing_y = scale * f64i(metrics.horiBearingY),
-                    .width = 0.0,
-                    .height = 0.0,
-                },
-                .codepoint = codepoint,
-                .tex_u = 1.0,
-                .tex_v = 1.0,
-                .tex_w = 0.0,
-                .tex_h = 0.0,
-            };
-            continue;
-        }
-
-        if (is_msdf10)
-            rect_px_msdf10.putAssumeCapacity(
-                i,
-                try getMsdf10Pixels(allocator, gen_opts, glyph_w, glyph_h, &shape, translate_x, translate_y, oob_point),
-            )
-        else
-            rect_px_normal.putAssumeCapacity(
-                i,
-                try getSdfPixels(allocator, gen_opts, glyph_w, glyph_h, &shape, translate_x, translate_y, oob_point),
-            );
-
-        const padded_w = glyph_w + padding * 2;
-        const padded_h = glyph_h + padding * 2;
-        rects.appendAssumeCapacity(.{
-            .id = @intCast(i),
-            .rect = .{ .w = padded_w, .h = padded_h },
-        });
-
-        glyphs[i] = .{
-            .glyph_data = .{
-                .advance = scale * f64i(self.face.glyph().advance().x),
-                .bearing_x = scale * f64i(metrics.horiBearingX),
-                .bearing_y = scale * f64i(metrics.horiBearingY),
-                .width = padded_w,
-                .height = padded_h,
-            },
-            .codepoint = codepoint,
-            .tex_u = f64_nan,
-            .tex_v = f64_nan,
-            .tex_w = f64_nan,
-            .tex_h = f64_nan,
-        };
+            try process_group.concurrent(io, processAtlasCodepoint, args);
     }
+    try process_group.await(io);
 
-    try pack.pack(pack.IdRect, &pack_ctx, rects.items, .{ .sortLessThanFn = sortLessThan });
+    var pack_ctx: pack.Context = try .create(allocator, w, h, .{});
+    defer pack_ctx.deinit();
+    try pack.pack(pack.IdRect, &pack_ctx, id_rects, .{ .sortLessThanFn = sortLessThan });
 
-    const fw = f64i(w);
-    const fh = f64i(h);
-    const mod_channels: usize = if (is_msdf10) 1 else channels;
+    const mod_channels = if (gen_opts.sdf_type == .msdf10)
+        4
+    else
+        gen_opts.sdf_type.numChannels();
+    const pixels = try allocator.alloc(u8, @as(usize, w) * @as(usize, h) * @as(usize, mod_channels));
+    errdefer allocator.free(pixels);
+    @memset(pixels, 0);
 
-    for (rects.items) |id_rect| {
+    for (id_rects) |id_rect| {
         const index: usize = @intCast(id_rect.id);
         const rect = id_rect.rect;
+        glyphs[index].tex_bounds = rect;
+        if (rect.w <= 0 or rect.h <= 0)
+            continue;
 
         const glyph_w: usize = @intCast(rect.w - padding * 2);
         const glyph_h: usize = @intCast(rect.h - padding * 2);
@@ -494,34 +410,157 @@ pub fn generateAtlas(
         for (0..glyph_h) |j| {
             const atlas_idx = ((cur_atlas_y + j) * w + cur_atlas_x) * mod_channels;
             const src_idx = (j * glyph_w) * mod_channels;
-            if (is_msdf10)
-                @memcpy(
-                    msdf10_pixels[atlas_idx .. atlas_idx + glyph_w * mod_channels],
-                    rect_px_msdf10.get(index).?[src_idx .. src_idx + glyph_w * mod_channels],
-                )
-            else
-                @memcpy(
-                    normal_pixels[atlas_idx .. atlas_idx + glyph_w * mod_channels],
-                    rect_px_normal.get(index).?[src_idx .. src_idx + glyph_w * mod_channels],
-                );
+            @memcpy(
+                pixels[atlas_idx .. atlas_idx + glyph_w * mod_channels],
+                rect_pixels[index][src_idx .. src_idx + glyph_w * mod_channels],
+            );
         }
-
-        glyphs[index].tex_u = f64i(rect.x) / fw;
-        glyphs[index].tex_v = f64i(rect.y) / fh;
-        glyphs[index].tex_w = f64i(rect.w) / fw;
-        glyphs[index].tex_h = f64i(rect.h) / fh;
     }
 
     return .{
         .glyphs = glyphs,
-        .pixels = if (is_msdf10)
-            .{ .msdf10 = msdf10_pixels }
-        else
-            .{ .normal = normal_pixels },
+        .pixels = pixels,
         .kernings = if (use_kerning and kernings.items.len > 0)
             try kernings.toOwnedSlice(allocator)
         else
             &.{},
+    };
+}
+
+fn processAtlasCodepoint(
+    self: *Generator,
+    allocator: std.mem.Allocator,
+    gen_opts: *const GenerationOptions,
+    codepoint: u21,
+    glyph: *AtlasGlyphData,
+    id_rect: *pack.IdRect,
+    rect_px: *[]const u8,
+    char_idx: u32,
+    padding: u8,
+    scale: f64,
+) std.Io.Cancelable!void {
+    self.processAtlasCodepointInner(
+        allocator,
+        gen_opts,
+        glyph,
+        id_rect,
+        rect_px,
+        char_idx,
+        padding,
+        scale,
+        codepoint,
+    ) catch {
+        if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
+        return std.Io.Cancelable.Canceled;
+    };
+}
+
+fn processAtlasCodepointInner(
+    self: *Generator,
+    allocator: std.mem.Allocator,
+    gen_opts: *const GenerationOptions,
+    glyph: *AtlasGlyphData,
+    id_rect: *pack.IdRect,
+    rect_px: *[]const u8,
+    char_idx: u32,
+    padding: u8,
+    scale: f64,
+    codepoint: u21,
+) !void {
+    const face = try self.library.createFaceMemory(self.font_memory, 0);
+    defer face.deinit();
+    try self.handleVarFont(face, allocator, gen_opts.var_font_args, face.faceFlags());
+
+    try face.loadGlyph(char_idx, .{ .no_scale = true, .no_bitmap = true });
+
+    var shape: Shape = .{};
+    defer {
+        for (shape.contours.items) |*contour| contour.edges.deinit(allocator);
+        shape.contours.deinit(allocator);
+    }
+
+    var context: FreetypeContext = .{
+        .allocator = allocator,
+        .scale = scale,
+        .shape = &shape,
+    };
+
+    const outline = face.glyph().outline().?;
+    try ft.intToError(ft.c.FT_Outline_Decompose(
+        outline.handle,
+        &.{
+            .move_to = ftMoveTo,
+            .line_to = ftLineTo,
+            .conic_to = ftConicTo,
+            .cubic_to = ftCubicTo,
+            .shift = 0,
+            .delta = 0,
+        },
+        &context,
+    ));
+
+    if (shape.contours.items.len != 0 and shape.contours.getLast().edges.items.len == 0)
+        _ = shape.contours.orderedRemove(shape.contours.items.len - 1);
+
+    if (!shape.validate()) return error.InvalidShape;
+    if (gen_opts.geometry_preprocess) try shape.orientContours(allocator);
+    try shape.normalize(allocator);
+
+    const f_px_size = f64i(gen_opts.px_size);
+    const px_range = f64i(gen_opts.px_range) / f_px_size;
+
+    var bounds = shape.getBounds(0, 0, 0);
+    if (bounds.left >= bounds.right or bounds.bottom >= bounds.top)
+        bounds = .{ .left = 0, .bottom = 0, .right = 1, .top = 1 };
+
+    const translate_x = -bounds.left + px_range / 2.0;
+    const translate_y = -bounds.bottom + px_range / 2.0;
+    const glyph_w: u16 = @intFromFloat((bounds.right - bounds.left + px_range) * f_px_size);
+    const glyph_h: u16 = @intFromFloat((bounds.top - bounds.bottom + px_range) * f_px_size);
+
+    const oob_point: Vec2 = if (gen_opts.orientation == .guess)
+        .{ bounds.left - (bounds.right - bounds.left) - 1, bounds.bottom - (bounds.top - bounds.bottom) - 1 }
+    else
+        undefined;
+
+    const metrics = face.glyph().metrics();
+    if (codepoint == ' ' or glyph_w == 0 or glyph_h == 0) {
+        glyph.* = .{
+            .glyph_data = .{
+                .advance = scale * f64i(face.glyph().advance().x),
+                .bearing_x = scale * f64i(metrics.horiBearingX),
+                .bearing_y = scale * f64i(metrics.horiBearingY),
+                .width = 0.0,
+                .height = 0.0,
+            },
+            .codepoint = codepoint,
+            .tex_bounds = .{ .w = 0, .h = 0 },
+        };
+        id_rect.rect = .{ .w = 0, .h = 0 };
+        return;
+    }
+
+    rect_px.* = try getSdfPixels(allocator, gen_opts, glyph_w, glyph_h, &shape, translate_x, translate_y, oob_point);
+
+    const padded_w = glyph_w + padding * 2;
+    const padded_h = glyph_h + padding * 2;
+    id_rect.rect = .{ .w = padded_w, .h = padded_h };
+
+    glyph.* = .{
+        .glyph_data = .{
+            .advance = scale * f64i(face.glyph().advance().x),
+            .bearing_x = scale * f64i(metrics.horiBearingX),
+            .bearing_y = scale * f64i(metrics.horiBearingY),
+            .width = padded_w,
+            .height = padded_h,
+        },
+        .codepoint = codepoint,
+        .tex_bounds = .{
+            .x = std.math.minInt(i32),
+            .y = std.math.minInt(i32),
+            .w = std.math.minInt(i32),
+            .h = std.math.minInt(i32),
+        },
     };
 }
 
@@ -531,7 +570,7 @@ fn sortLessThan(_: void, a: pack.IdRect, b: pack.IdRect) bool {
 
 fn getSdfPixelsInner(
     allocator: std.mem.Allocator,
-    opts: GenerationOptions,
+    opts: *const GenerationOptions,
     w: u16,
     h: u16,
     shape: *Shape,
@@ -542,67 +581,72 @@ fn getSdfPixelsInner(
     const f_px_size = f64i(opts.px_size);
     const px_range = f64i(opts.px_range) / f_px_size;
 
-    var error_correction: ?ErrorCorrection =
-        if (opts.error_correction_opts) |ec_opts| b: {
-            break :b if (opts.sdf_type == .msdf or opts.sdf_type == .mtsdf)
-                try .create(allocator, shape, w, h, ec_opts, opts.scanline_fill_rule != null)
-            else
-                null;
-        } else null;
+    var error_correction: ?ErrorCorrection = null;
+    if (opts.sdf_type == .msdf or
+        opts.sdf_type == .mtsdf or
+        opts.sdf_type == .msdf10)
+        if (opts.error_correction_opts) |ec_opts| {
+            error_correction = try .create(allocator, shape, w, h, ec_opts, opts.scanline_fill_rule != null);
+        };
     defer if (error_correction) |*ec| ec.destroy(allocator);
 
-    const channels = opts.sdf_type.numChannels();
-
-    const pixels = try allocator.alloc(f64, @as(u32, w) * @as(u32, h) * @as(u32, channels));
+    const mod_channels = if (opts.sdf_type == .msdf10)
+        4
+    else
+        opts.sdf_type.numChannels();
+    const pixels = try allocator.alloc(f64, @as(usize, w) * @as(usize, h) * @as(usize, mod_channels));
     const invert_pixels = opts.orientation == .reverse or
         (opts.orientation == .guess and findDistanceAt(shape.*, oob_point, px_range) > 0);
     switch (opts.sdf_type) {
         .sdf => generateSdf(pixels, w, h, f_px_size, shape.*, px_range, translate_x, translate_y, invert_pixels),
         .psdf => generatePsdf(pixels, w, h, f_px_size, shape.*, px_range, translate_x, translate_y, invert_pixels),
         .msdf, .msdf10 => {
-            try coloring.colorShape(allocator, shape, opts.corner_angle_threshold);
+            try coloring.colorShape(allocator, opts.coloring_rng_seed, shape, opts.corner_angle_threshold);
             generateMsdf(pixels, w, h, f_px_size, shape.*, px_range, translate_x, translate_y, invert_pixels);
         },
         .mtsdf => {
-            try coloring.colorShape(allocator, shape, opts.corner_angle_threshold);
+            try coloring.colorShape(allocator, opts.coloring_rng_seed, shape, opts.corner_angle_threshold);
             generateMtsdf(pixels, w, h, f_px_size, shape.*, px_range, translate_x, translate_y, invert_pixels);
         },
     }
 
-    if (!opts.geometry_preprocess) if (opts.scanline_fill_rule) |fill_rule|
-        switch (opts.sdf_type) {
-            .sdf, .psdf => try sdfSignCorrection(
-                allocator,
-                pixels,
-                w,
-                h,
-                f_px_size,
-                shape.*,
-                translate_x,
-                translate_y,
-                fill_rule,
-            ),
-            .msdf, .msdf10, .mtsdf => try msdfSignCorrection(
-                allocator,
-                pixels,
-                w,
-                h,
-                f_px_size,
-                shape.*,
-                translate_x,
-                translate_y,
-                fill_rule,
-                channels,
-            ),
-        };
+    if (!opts.geometry_preprocess)
+        if (opts.scanline_fill_rule) |fill_rule|
+            switch (opts.sdf_type) {
+                .sdf, .psdf => try sdfSignCorrection(
+                    allocator,
+                    pixels,
+                    w,
+                    h,
+                    f_px_size,
+                    shape.*,
+                    translate_x,
+                    translate_y,
+                    fill_rule,
+                ),
+                .msdf, .msdf10, .mtsdf => try msdfSignCorrection(
+                    allocator,
+                    pixels,
+                    w,
+                    h,
+                    f_px_size,
+                    shape.*,
+                    translate_x,
+                    translate_y,
+                    fill_rule,
+                    mod_channels,
+                ),
+            };
 
-    if (error_correction) |*ec| ec.correct(shape, f_px_size, px_range, translate_x, translate_y, pixels, w, h, channels);
+    if (error_correction) |*ec|
+        ec.correct(shape, f_px_size, px_range, translate_x, translate_y, pixels, w, h, mod_channels);
+
     return pixels;
 }
 
 fn getSdfPixels(
     allocator: std.mem.Allocator,
-    opts: GenerationOptions,
+    opts: *const GenerationOptions,
     w: u16,
     h: u16,
     shape: *Shape,
@@ -610,7 +654,7 @@ fn getSdfPixels(
     translate_y: f64,
     oob_point: Vec2,
 ) ![]const u8 {
-    const float_pixels = try getSdfPixelsInner(
+    const f_sdf_px = try getSdfPixelsInner(
         allocator,
         opts,
         w,
@@ -620,52 +664,25 @@ fn getSdfPixels(
         translate_y,
         oob_point,
     );
-    defer allocator.free(float_pixels);
+    defer allocator.free(f_sdf_px);
 
-    const channels = opts.sdf_type.numChannels();
-    const pixels = try allocator.alloc(u8, @as(u32, w) * @as(u32, h) * @as(u32, channels));
-
-    for (0..h) |y| for (0..w) |x| {
-        const idx = y * w * channels + x * channels;
-        for (0..channels) |i|
-            pixels[idx + i] = @intFromFloat(std.math.maxInt(u8) * std.math.clamp(float_pixels[idx + i], 0.0, 1.0));
-    };
-    return pixels;
-}
-
-fn getMsdf10Pixels(
-    allocator: std.mem.Allocator,
-    opts: GenerationOptions,
-    w: u16,
-    h: u16,
-    shape: *Shape,
-    translate_x: f64,
-    translate_y: f64,
-    oob_point: Vec2,
-) ![]const Msdf10Pixel {
-    const float_pixels = try getSdfPixelsInner(
-        allocator,
-        opts,
-        w,
-        h,
-        shape,
-        translate_x,
-        translate_y,
-        oob_point,
-    );
-    defer allocator.free(float_pixels);
-
-    const channels = opts.sdf_type.numChannels();
-    const pixels = try allocator.alloc(Msdf10Pixel, @as(u32, w) * @as(u32, h));
+    const mod_channels = if (opts.sdf_type == .msdf10)
+        4
+    else
+        opts.sdf_type.numChannels();
+    const pixels = try allocator.alloc(u8, @as(usize, w) * @as(usize, h) * @as(usize, mod_channels));
 
     for (0..h) |y| for (0..w) |x| {
-        const dist_rgb = float_pixels[y * w * channels + x * channels ..];
-        pixels[y * w + x] = .{
-            .a = std.math.maxInt(u2),
-            .b = @intFromFloat(std.math.maxInt(u10) * std.math.clamp(dist_rgb[2], 0.0, 1.0)),
-            .g = @intFromFloat(std.math.maxInt(u10) * std.math.clamp(dist_rgb[1], 0.0, 1.0)),
-            .r = @intFromFloat(std.math.maxInt(u10) * std.math.clamp(dist_rgb[0], 0.0, 1.0)),
-        };
+        const idx = y * w * mod_channels + x * mod_channels;
+        if (opts.sdf_type == .msdf10)
+            pixels[y * w * 4 + x * 4 ..][0..4].* = std.mem.toBytes(Msdf10Pixel{
+                .r = @trunc(std.math.maxInt(u10) * std.math.clamp(f_sdf_px[idx], 0.0, 1.0)),
+                .g = @trunc(std.math.maxInt(u10) * std.math.clamp(f_sdf_px[idx + 1], 0.0, 1.0)),
+                .b = @trunc(std.math.maxInt(u10) * std.math.clamp(f_sdf_px[idx + 2], 0.0, 1.0)),
+                .a = std.math.maxInt(u2),
+            })
+        else for (0..mod_channels) |i|
+            pixels[idx + i] = @trunc(std.math.maxInt(u8) * std.math.clamp(f_sdf_px[idx + i], 0.0, 1.0));
     };
     return pixels;
 }
@@ -709,9 +726,11 @@ fn msdfSignCorrection(
 ) !void {
     var scanline: Scanline = .{};
     defer scanline.intersections.deinit(allocator);
-    var ambiguous = false;
-    var match_map: []i32 = try allocator.alloc(i32, w * h);
+
+    var match_map = try allocator.alloc(i32, w * h);
     defer allocator.free(match_map);
+
+    var ambiguous = false;
     var match_idx: usize = 0;
     const scaled_w = w * channels;
     for (0..h) |y| {
@@ -734,6 +753,7 @@ fn msdfSignCorrection(
     }
 
     if (!ambiguous) return;
+
     match_idx = 0;
     for (0..h) |y| {
         const row = h - y - 1;
@@ -794,21 +814,19 @@ fn generatePsdf(out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px_
                 (f64i(x) + 0.5) / scale - tx,
                 (f64i(y) + 0.5) / scale - ty,
             };
-            var min_dist: SignedDistance = .{};
-            var near_edge: ?*EdgeSegment = null;
-            var near_param: f64 = 0;
+            var target: PsdfData = .{};
             for (shape.contours.items) |contour| for (contour.edges.items) |*edge| {
                 var param: f64 = 0;
                 const dist = edge.signedDistance(p, &param);
-                if (dist.lessThan(min_dist)) {
-                    min_dist = dist;
-                    near_edge = edge;
-                    near_param = param;
+                if (dist.lessThan(target.min_dist)) {
+                    target.min_dist = dist;
+                    target.near_edge = edge;
+                    target.near_param = param;
                 }
             };
-            if (near_edge) |edge| edge.distanceToPerpendicularDistance(&min_dist, p, near_param);
+            if (target.near_edge) |edge| edge.distanceToPerpendicularDistance(&target.min_dist, p, target.near_param);
             const out = &out_pixels[row * w + x];
-            out.* = (min_dist.distance + px_range / 2.0) / px_range;
+            out.* = (target.min_dist.distance + px_range / 2.0) / px_range;
             if (invert_pixels) out.* = 1.0 - out.*;
         }
     }
@@ -826,15 +844,15 @@ fn generateMsdf(out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px_
             for (shape.contours.items) |contour| for (contour.edges.items) |*edge| {
                 var param: f64 = 0;
                 const dist = edge.signedDistance(p, &param);
-                inline for (.{
-                    .{ .color = EdgeColor.red, .target = &rgb[0] },
-                    .{ .color = EdgeColor.green, .target = &rgb[1] },
-                    .{ .color = EdgeColor.blue, .target = &rgb[2] },
-                }) |color_map|
-                    if ((@intFromEnum(edge.color) & @intFromEnum(color_map.color)) != 0 and dist.lessThan(color_map.target.min_dist)) {
-                        color_map.target.min_dist = dist;
-                        color_map.target.near_edge = edge;
-                        color_map.target.near_param = param;
+                for ([_]struct { color: EdgeColor, target: *PsdfData }{
+                    .{ .color = .red, .target = &rgb[0] },
+                    .{ .color = .green, .target = &rgb[1] },
+                    .{ .color = .blue, .target = &rgb[2] },
+                }) |params|
+                    if ((@intFromEnum(edge.color) & @intFromEnum(params.color)) != 0 and dist.lessThan(params.target.min_dist)) {
+                        params.target.min_dist = dist;
+                        params.target.near_edge = edge;
+                        params.target.near_param = param;
                     };
             };
             for (&rgb) |*target|
@@ -865,15 +883,15 @@ fn generateMtsdf(out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px
                 var param: f64 = 0;
                 const dist = edge.signedDistance(p, &param);
                 if (dist.lessThan(min_dist)) min_dist = dist;
-                inline for (.{
-                    .{ .color = EdgeColor.red, .target = &rgb[0] },
-                    .{ .color = EdgeColor.green, .target = &rgb[1] },
-                    .{ .color = EdgeColor.blue, .target = &rgb[2] },
-                }) |color_map|
-                    if ((@intFromEnum(edge.color) & @intFromEnum(color_map.color)) != 0 and dist.lessThan(color_map.target.min_dist)) {
-                        color_map.target.min_dist = dist;
-                        color_map.target.near_edge = edge;
-                        color_map.target.near_param = param;
+                for ([_]struct { color: EdgeColor, target: *PsdfData }{
+                    .{ .color = .red, .target = &rgb[0] },
+                    .{ .color = .green, .target = &rgb[1] },
+                    .{ .color = .blue, .target = &rgb[2] },
+                }) |params|
+                    if ((@intFromEnum(edge.color) & @intFromEnum(params.color)) != 0 and dist.lessThan(params.target.min_dist)) {
+                        params.target.min_dist = dist;
+                        params.target.near_edge = edge;
+                        params.target.near_param = param;
                     };
             };
             for (&rgb) |*target|
@@ -893,19 +911,26 @@ fn generateMtsdf(out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px
     }
 }
 
+fn scaledFtVec(vec: [*c]const ft.Vector, scale: f64) Vec2 {
+    return .{
+        f64i(vec.*.x) * scale,
+        f64i(vec.*.y) * scale,
+    };
+}
+
 fn ftMoveTo(to: [*c]const ft.Vector, ud: ?*anyopaque) callconv(.c) i32 {
     var context: *FreetypeContext = @ptrCast(@alignCast(ud));
     if (!(context.contour != null and context.contour.?.edges.items.len == 0)) {
         context.contour = context.shape.contours.addOne(context.allocator) catch return ft.c.FT_Err_Out_Of_Memory;
         context.contour.?.* = .{};
     }
-    context.pos = .{ f64i(to.*.x) * context.scale, f64i(to.*.y) * context.scale };
+    context.pos = scaledFtVec(to, context.scale);
     return 0;
 }
 
 fn ftLineTo(to: [*c]const ft.Vector, ud: ?*anyopaque) callconv(.c) i32 {
     var context: *FreetypeContext = @ptrCast(@alignCast(ud));
-    const endpoint: Vec2 = .{ f64i(to.*.x) * context.scale, f64i(to.*.y) * context.scale };
+    const endpoint: Vec2 = scaledFtVec(to, context.scale);
     if (!std.meta.eql(endpoint, context.pos)) {
         context.contour.?.edges.append(
             context.allocator,
@@ -918,11 +943,11 @@ fn ftLineTo(to: [*c]const ft.Vector, ud: ?*anyopaque) callconv(.c) i32 {
 
 fn ftConicTo(control: [*c]const ft.Vector, to: [*c]const ft.Vector, ud: ?*anyopaque) callconv(.c) i32 {
     var context: *FreetypeContext = @ptrCast(@alignCast(ud));
-    const endpoint: Vec2 = .{ f64i(to.*.x) * context.scale, f64i(to.*.y) * context.scale };
+    const endpoint: Vec2 = scaledFtVec(to, context.scale);
     if (!std.meta.eql(endpoint, context.pos)) {
         context.contour.?.edges.append(context.allocator, .create(
             context.pos,
-            .{ f64i(control.*.x) * context.scale, f64i(control.*.y) * context.scale },
+            scaledFtVec(control, context.scale),
             endpoint,
             null,
             .white,
@@ -932,11 +957,16 @@ fn ftConicTo(control: [*c]const ft.Vector, to: [*c]const ft.Vector, ud: ?*anyopa
     return 0;
 }
 
-fn ftCubicTo(control1: [*c]const ft.Vector, control2: [*c]const ft.Vector, to: [*c]const ft.Vector, ud: ?*anyopaque) callconv(.c) i32 {
+fn ftCubicTo(
+    control_1: [*c]const ft.Vector,
+    control_2: [*c]const ft.Vector,
+    to: [*c]const ft.Vector,
+    ud: ?*anyopaque,
+) callconv(.c) i32 {
     var context: *FreetypeContext = @ptrCast(@alignCast(ud));
-    const endpoint: Vec2 = .{ f64i(to.*.x) * context.scale, f64i(to.*.y) * context.scale };
-    const scaled_c1: Vec2 = .{ f64i(control1.*.x) * context.scale, f64i(control1.*.y) * context.scale };
-    const scaled_c2: Vec2 = .{ f64i(control2.*.x) * context.scale, f64i(control2.*.y) * context.scale };
+    const endpoint: Vec2 = scaledFtVec(to, context.scale);
+    const scaled_c1: Vec2 = scaledFtVec(control_1, context.scale);
+    const scaled_c2: Vec2 = scaledFtVec(control_2, context.scale);
     if (!std.meta.eql(endpoint, context.pos) or math.cross(scaled_c1 - endpoint, scaled_c2 - endpoint) != 0.0) {
         context.contour.?.edges.append(
             context.allocator,

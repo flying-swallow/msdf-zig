@@ -9,8 +9,8 @@
     },
     .dependencies = .{
         .freetype = .{
-            .url = "https://download.savannah.gnu.org/releases/freetype/freetype-2.14.1.tar.gz",
-            .hash = "N-V-__8AAIT5KwGz955VFk9c5rWaksEC9xVOvGDyR5JBAXnB",
+            .url = "https://download.savannah.gnu.org/releases/freetype/freetype-2.14.3.tar.gz",
+            .hash = "N-V-__8AAJo-LAHFNfa0p0oMQqmwlBEAZMOeo03azXgrKLTT",
         },
     },
 }
