@@ -2,6 +2,49 @@ const std = @import("std");
 
 const Vec2 = @Vector(2, f64);
 
+pub fn RectangleBound(T: type) type {
+    return struct {
+        l: T,
+        b: T,
+        r: T,
+        t: T,
+        const Self = @This();
+
+        pub const empty: RectangleBound(T) = switch (@typeInfo(T)) {
+            .float, .comptime_float => .{
+                .l = std.math.floatMax(T),
+                .b = std.math.floatMax(T),
+                .r = -std.math.floatMax(T),
+                .t = -std.math.floatMax(T),
+            },
+            else => .{
+                .l = std.math.maxInt(T),
+                .b = std.math.maxInt(T),
+                .r = std.math.minInt(T),
+                .t = std.math.minInt(T),
+            },
+        };
+
+        pub fn addBound(a: Self, b: Self) Self {
+            return .{
+                .l = @min(a.l, b.l),
+                .b = @min(a.b, b.b),
+                .r = @max(a.r, b.r),
+                .t = @max(a.t, b.t),
+            };
+        }
+
+        pub fn addPoint(self: Self, a: @Vector(2, T)) Self {
+            return .{
+                .l = @min(a[0], self.l),
+                .b = @min(a[1], self.b),
+                .r = @max(a[0], self.r),
+                .t = @max(a[1], self.t),
+            };
+        }
+    };
+}
+
 // Cubic Bezier and its first two derivatives, in the (qa, ab, br, as) basis the
 // distance search works in: qa = p0-origin, ab = p1-p0, br = p2-p1-ab,
 // as = (p3-p2)-(p2-p1)-br.

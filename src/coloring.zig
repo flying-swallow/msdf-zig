@@ -72,11 +72,11 @@ pub fn colorShape(allocator: std.mem.Allocator, shape: *Shape, angle_threshold: 
                     var parts: [7]EdgeSegment = @splat(.{});
                     var filled: [7]bool = @splat(false);
                     const base = 3 * corner;
-                    contour.edges.items[0].splitInThirds(parts[base..][0..3]);
+                    parts[base..][0..3].* = contour.edges.items[0].splitInThirds();
                     for (base..base + 3) |i| filled[i] = true;
                     if (m >= 2) {
                         const other = 3 - 3 * corner;
-                        contour.edges.items[1].splitInThirds(parts[other..][0..3]);
+                        parts[other..][0..3].* = contour.edges.items[1].splitInThirds();
                         for (other..other + 3) |i| filled[i] = true;
                         parts[0].color = colors[0];
                         parts[1].color = colors[0];

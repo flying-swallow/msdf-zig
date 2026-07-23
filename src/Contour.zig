@@ -7,21 +7,15 @@ const Vec2 = @Vector(2, f64);
 
 edges: std.ArrayList(EdgeSegment) = .empty,
 
-pub fn boundPoint(l: *f64, b: *f64, r: *f64, t: *f64, p: Vec2) void {
-    const x = p[0];
-    const y = p[1];
-    if (x < l.*) l.* = x;
-    if (y < b.*) b.* = y;
-    if (x > r.*) r.* = x;
-    if (y > t.*) t.* = y;
+pub fn bound(self: Contour, a: math.RectangleBound(f64)) math.RectangleBound(f64) {
+    var bounds = a;
+    for (self.edges.items) |edge| bounds = edge.bound(bounds);
+    return bounds;
 }
 
-pub fn bound(self: Contour, l: *f64, b: *f64, r: *f64, t: *f64) void {
-    for (self.edges.items) |edge| edge.bound(l, b, r, t);
-}
-
-pub fn boundMiters(self: Contour, l: *f64, b: *f64, r: *f64, t: *f64, border: f64, miter_limit: f64, polarity: i32) void {
-    if (self.edges.items.len == 0) return;
+pub fn boundMiters(self: Contour, a: math.RectangleBound(f64), border: f64, miter_limit: f64, polarity: i32) math.RectangleBound(f64) {
+    var bounds = a;
+    if (self.edges.items.len == 0) return bounds;
     var prev_dir = math.normal(self.edges.getLast().?.direction(1), false);
     for (self.edges.items) |edge| {
         const dir = math.normal(edge.direction(0), false) * math.v2(-1.0);
@@ -30,13 +24,15 @@ pub fn boundMiters(self: Contour, l: *f64, b: *f64, r: *f64, t: *f64, border: f6
             const q = 0.5 * (1 - math.dot(prev_dir, dir));
             if (q > 0) miter_length = @min(1 / @sqrt(q), miter_limit);
             const miter = edge.point(0) + math.normal(prev_dir + dir, false) * math.v2(border * miter_length);
-            boundPoint(l, b, r, t, miter);
+            bounds = bounds.addPoint(miter);
         }
         prev_dir = math.normal(edge.direction(1), false);
     }
+    return bounds;
 }
 
 pub fn reverse(self: *Contour) void {
     std.mem.reverse(EdgeSegment, self.edges.items);
     for (self.edges.items) |*edge| edge.reverse();
 }
+

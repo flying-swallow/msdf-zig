@@ -46,8 +46,7 @@ pub fn validate(self: Shape) bool {
 pub fn normalize(self: *Shape, allocator: std.mem.Allocator) !void {
     for (self.contours.items) |*contour| {
         if (contour.edges.items.len == 1) {
-            var parts: [3]EdgeSegment = @splat(.{});
-            contour.edges.items[0].splitInThirds(&parts);
+            const parts = contour.edges.items[0].splitInThirds();
             contour.edges.clearRetainingCapacity();
             try contour.edges.appendSlice(allocator, &parts);
         } else if (contour.edges.items.len > 0) {
@@ -61,8 +60,8 @@ pub fn normalize(self: *Shape, allocator: std.mem.Allocator) !void {
                     var axis = math.normal(cur_dir - prev_dir, true) * math.v2(factor);
                     if (convergent_curve_ordering.convergentCurveOrdering(prev_edge.*, edge.*) < 0)
                         axis *= math.v2(-1.0);
-                    prev_edge.deconverge(1, math.ortho(axis, true));
-                    edge.deconverge(0, math.ortho(axis, false));
+                    prev_edge.* = prev_edge.deconverge(1, math.ortho(axis, true));
+                    edge.* = edge.deconverge(0, math.ortho(axis, false));
                 }
                 prev_edge = edge;
             }
@@ -70,32 +69,29 @@ pub fn normalize(self: *Shape, allocator: std.mem.Allocator) !void {
     }
 }
 
-pub fn bound(self: Shape, l: *f64, b: *f64, r: *f64, t: *f64) void {
-    for (self.contours.items) |contour| contour.bound(l, b, r, t);
+pub fn bound(self: Shape, a: math.RectangleBound(f64)) math.RectangleBound(f64) {
+    var bounds = a;
+    for (self.contours.items) |contour| bounds = contour.bound(bounds);
+    return bounds;
 }
 
-pub fn boundMiters(self: Shape, l: *f64, b: *f64, r: *f64, t: *f64, border: f64, miter_limit: f64, polarity: i32) void {
-    for (self.contours.items) |contour| contour.boundMiters(l, b, r, t, border, miter_limit, polarity);
+pub fn boundMiters(self: Shape, a: math.RectangleBound(f64), border: f64, miter_limit: f64, polarity: i32) math.RectangleBound(f64) {
+    var bounds = a;
+    for (self.contours.items) |contour| bounds = contour.boundMiters(bounds, border, miter_limit, polarity);
+    return bounds;
 }
 
 pub fn getBounds(self: Shape, border: f64, miter_limit: f64, polarity: i32) Bounds {
-    const large_value = 1e240;
-    var bounds: Bounds = .{
-        .left = large_value,
-        .bottom = large_value,
-        .right = -large_value,
-        .top = -large_value,
-    };
-    self.bound(&bounds.left, &bounds.bottom, &bounds.right, &bounds.top);
+    var bounds = self.bound(.empty);
     if (border > 0) {
-        bounds.left -= border;
-        bounds.bottom -= border;
-        bounds.right += border;
-        bounds.top += border;
+        bounds.l -= border;
+        bounds.b -= border;
+        bounds.r += border;
+        bounds.t += border;
         if (miter_limit > 0)
-            self.boundMiters(&bounds.left, &bounds.bottom, &bounds.right, &bounds.top, border, miter_limit, polarity);
+            bounds = self.boundMiters(bounds, border, miter_limit, polarity);
     }
-    return bounds;
+    return .{ .left = bounds.l, .bottom = bounds.b, .right = bounds.r, .top = bounds.t };
 }
 
 pub fn scanline(self: Shape, line: *Scanline, y: f64, allocator: std.mem.Allocator) !void {

@@ -15,7 +15,6 @@ const EdgeSegment = @This();
 const cubic_starts = 4;
 const cubic_steps = 4;
 
-
 color: EdgeColor = .white,
 segment: union(enum) {
     linear: [2]Vec2,
@@ -74,7 +73,7 @@ pub fn distanceToPerpendicularDistance(self: EdgeSegment, distance: SignedDistan
         if (dot(aq, dir) < 0) {
             const perp_dist = cross(aq, dir);
             if (@abs(perp_dist) <= @abs(distance.distance)) {
-                return SignedDistance { .distance = perp_dist };
+                return SignedDistance{ .distance = perp_dist };
             }
         }
     } else if (param > 1) {
@@ -83,7 +82,7 @@ pub fn distanceToPerpendicularDistance(self: EdgeSegment, distance: SignedDistan
         if (dot(bq, dir) > 0) {
             const perp_dist = cross(bq, dir);
             if (@abs(perp_dist) <= @abs(distance.distance)) {
-                return SignedDistance { .distance = perp_dist };
+                return SignedDistance{ .distance = perp_dist };
             }
         }
     }
@@ -430,46 +429,43 @@ pub fn scanlineIntersections(self: EdgeSegment, x: *[3]f64, dy: *[3]i32, y: f64)
     }
 }
 
-fn pointBounds(p: Vec2, l: *f64, b: *f64, r: *f64, t: *f64) void {
-    const x = p[0];
-    const y = p[1];
-    if (x < l.*) l.* = x;
-    if (y < b.*) b.* = y;
-    if (x > r.*) r.* = x;
-    if (y > t.*) t.* = y;
-}
-
-pub fn bound(self: EdgeSegment, l: *f64, b: *f64, r: *f64, t: *f64) void {
+pub fn bound(self: EdgeSegment, bounds: math.RectangleBound(f64)) math.RectangleBound(f64) {
+    var b = bounds;
     switch (self.segment) {
         .linear => |p| {
-            pointBounds(p[0], l, b, r, t);
-            pointBounds(p[1], l, b, r, t);
+            b = b.addPoint(p[0]);
+            b = b.addPoint(p[1]);
         },
         .quadratic_bezier => |p| {
-            pointBounds(p[0], l, b, r, t);
-            pointBounds(p[2], l, b, r, t);
+            b = b.addPoint(p[0]);
+            b = b.addPoint(p[2]);
             const bot = (p[1] - p[0]) - (p[2] - p[1]);
             if (bot[0] != 0.0) {
                 const param = (p[1][0] - p[0][0]) / bot[0];
-                if (param > 0 and param < 1) pointBounds(self.point(param), l, b, r, t);
+                if (param > 0 and param < 1) b = b.addPoint(self.point(param));
             }
             if (bot[1] != 0.0) {
                 const param = (p[1][1] - p[0][1]) / bot[1];
-                if (param > 0 and param < 1) pointBounds(self.point(param), l, b, r, t);
+                if (param > 0 and param < 1) b = b.addPoint(self.point(param));
             }
         },
         .cubic_bezier => |p| {
-            pointBounds(p[0], l, b, r, t);
-            pointBounds(p[3], l, b, r, t);
+            b = b.addPoint(p[0]);
+            b = b.addPoint(p[3]);
             const a0 = p[1] - p[0];
             const a1 = (p[2] - p[1] - a0) * v2(2.0);
             const a2 = p[3] - p[2] * v2(3.0) + p[1] * v2(3.0) - p[0];
             var solved = math.solveQuadratic(a2[0], a1[0], a0[0]);
-            for (solved.solutions[0..solved.num]) |root| if (root > 0 and root < 1) pointBounds(self.point(root), l, b, r, t);
+            for (solved.solutions[0..solved.num]) |root| if (root > 0 and root < 1) {
+                b = b.addPoint(self.point(root));
+            };
             solved = math.solveQuadratic(a2[1], a1[1], a0[1]);
-            for (solved.solutions[0..solved.num]) |root| if (root > 0 and root < 1) pointBounds(self.point(root), l, b, r, t);
+            for (solved.solutions[0..solved.num]) |root| if (root > 0 and root < 1) {
+                b = b.addPoint(self.point(root));
+            };
         },
     }
+    return b;
 }
 
 pub fn reverse(self: *EdgeSegment) void {
@@ -483,89 +479,77 @@ pub fn reverse(self: *EdgeSegment) void {
     }
 }
 
-pub fn splitInThirds(self: EdgeSegment, out_p: *[3]EdgeSegment) void {
-    switch (self.segment) {
-        .linear => |p| {
-            out_p[0] = createLinear(p[0], self.point(1.0 / 3.0), self.color);
-            out_p[1] = createLinear(self.point(1.0 / 3.0), self.point(2.0 / 3.0), self.color);
-            out_p[2] = createLinear(self.point(2.0 / 3.0), p[1], self.color);
-        },
-        .quadratic_bezier => |p| {
-            out_p[0] = createQuadratic(p[0], mix(p[0], p[1], 1.0 / 3.0), self.point(1.0 / 3.0), self.color);
-            out_p[1] = createQuadratic(
-                self.point(1.0 / 3.0),
-                mix(
-                    mix(p[0], p[1], 5.0 / 9.0),
-                    mix(p[1], p[2], 4.0 / 9.0),
-                    0.5,
-                ),
-                self.point(2.0 / 3.0),
-                self.color,
-            );
-            out_p[2] = createQuadratic(self.point(2.0 / 3.0), mix(p[1], p[2], 2.0 / 3.0), p[2], self.color);
-        },
-        .cubic_bezier => |p| {
-            out_p[0] = createCubic(
-                p[0],
-                if (std.meta.eql(p[0], p[1])) p[0] else mix(p[0], p[1], 1.0 / 3.0),
+pub fn splitInThirds(self: EdgeSegment) [3]EdgeSegment {
+    return switch (self.segment) {
+        .linear => |p| .{ createLinear(p[0], self.point(1.0 / 3.0), self.color), createLinear(self.point(1.0 / 3.0), self.point(2.0 / 3.0), self.color), createLinear(self.point(2.0 / 3.0), p[1], self.color) },
+        .quadratic_bezier => |p| .{ createQuadratic(p[0], mix(p[0], p[1], 1.0 / 3.0), self.point(1.0 / 3.0), self.color), createQuadratic(
+            self.point(1.0 / 3.0),
+            mix(
+                mix(p[0], p[1], 5.0 / 9.0),
+                mix(p[1], p[2], 4.0 / 9.0),
+                0.5,
+            ),
+            self.point(2.0 / 3.0),
+            self.color,
+        ), createQuadratic(self.point(2.0 / 3.0), mix(p[1], p[2], 2.0 / 3.0), p[2], self.color) },
+        .cubic_bezier => |p| .{ createCubic(
+            p[0],
+            if (std.meta.eql(p[0], p[1])) p[0] else mix(p[0], p[1], 1.0 / 3.0),
+            mix(
+                mix(p[0], p[1], 1.0 / 3.0),
+                mix(p[1], p[2], 1.0 / 3.0),
+                1.0 / 3.0,
+            ),
+            self.point(1.0 / 3.0),
+            self.color,
+        ), createCubic(
+            self.point(1.0 / 3.0),
+            mix(
                 mix(
                     mix(p[0], p[1], 1.0 / 3.0),
                     mix(p[1], p[2], 1.0 / 3.0),
                     1.0 / 3.0,
                 ),
-                self.point(1.0 / 3.0),
-                self.color,
-            );
-            out_p[1] = createCubic(
-                self.point(1.0 / 3.0),
                 mix(
-                    mix(
-                        mix(p[0], p[1], 1.0 / 3.0),
-                        mix(p[1], p[2], 1.0 / 3.0),
-                        1.0 / 3.0,
-                    ),
-                    mix(
-                        mix(p[1], p[2], 1.0 / 3.0),
-                        mix(p[2], p[3], 1.0 / 3.0),
-                        1.0 / 3.0,
-                    ),
-                    2.0 / 3.0,
-                ),
-                mix(
-                    mix(
-                        mix(p[0], p[1], 2.0 / 3.0),
-                        mix(p[1], p[2], 2.0 / 3.0),
-                        2.0 / 3.0,
-                    ),
-                    mix(
-                        mix(p[1], p[2], 2.0 / 3.0),
-                        mix(p[2], p[3], 2.0 / 3.0),
-                        2.0 / 3.0,
-                    ),
+                    mix(p[1], p[2], 1.0 / 3.0),
+                    mix(p[2], p[3], 1.0 / 3.0),
                     1.0 / 3.0,
                 ),
-                self.point(2.0 / 3.0),
-                self.color,
-            );
-            out_p[2] = createCubic(
-                self.point(2.0 / 3.0),
+                2.0 / 3.0,
+            ),
+            mix(
+                mix(
+                    mix(p[0], p[1], 2.0 / 3.0),
+                    mix(p[1], p[2], 2.0 / 3.0),
+                    2.0 / 3.0,
+                ),
                 mix(
                     mix(p[1], p[2], 2.0 / 3.0),
                     mix(p[2], p[3], 2.0 / 3.0),
                     2.0 / 3.0,
                 ),
-                if (std.meta.eql(p[2], p[3])) p[3] else mix(p[2], p[3], 2.0 / 3.0),
-                p[3],
-                self.color,
-            );
-        },
-    }
+                1.0 / 3.0,
+            ),
+            self.point(2.0 / 3.0),
+            self.color,
+        ), createCubic(
+            self.point(2.0 / 3.0),
+            mix(
+                mix(p[1], p[2], 2.0 / 3.0),
+                mix(p[2], p[3], 2.0 / 3.0),
+                2.0 / 3.0,
+            ),
+            if (std.meta.eql(p[2], p[3])) p[3] else mix(p[2], p[3], 2.0 / 3.0),
+            p[3],
+            self.color,
+        ) },
+    };
 }
 
-pub fn convertToCubic(self: *EdgeSegment) void {
+pub fn toCubic(self: EdgeSegment) EdgeSegment {
     if (self.segment != .quadratic_bezier) @panic("This function is only supported on quadratic beziers");
     const p = self.segment.quadratic_bezier;
-    self.* = createCubic(
+    return createCubic(
         p[0],
         mix(p[0], p[1], 2.0 / 3.0),
         mix(p[1], p[2], 1.0 / 3.0),
@@ -574,21 +558,20 @@ pub fn convertToCubic(self: *EdgeSegment) void {
     );
 }
 
-pub fn deconverge(self: *EdgeSegment, param: u32, vector: Vec2) void {
-    switch (self.segment) {
+pub fn deconverge(self: EdgeSegment, param: u32, vector: Vec2) EdgeSegment {
+    const p = switch (self.segment) {
         .linear => @panic("Deconverging an edge is only supported on quadratic and cubic beziers"),
-        .cubic_bezier => {},
-        .quadratic_bezier => self.convertToCubic(),
-    }
+        .cubic_bezier => self.segment.cubic_bezier,
+        .quadratic_bezier => self.toCubic().segment.cubic_bezier,
+    };
 
-    const p = self.segment.cubic_bezier;
     // Move the inner control point along `vector`, by the length of the handle
     // it belongs to: p[1] += |p[1]-p[0]| * vector. Taking the length of the
     // componentwise product instead would both lose the direction and scale it
     // wrong.
-    switch (param) {
-        0 => self.segment.cubic_bezier[1] = p[1] + vector * v2(math.length(p[1] - p[0])),
-        1 => self.segment.cubic_bezier[2] = p[2] + vector * v2(math.length(p[2] - p[3])),
+    return .{ .color = self.color, .segment = .{ .cubic_bezier = switch (param) {
+        0 => .{ p[0], p[1] + vector * v2(math.length(p[1] - p[0])), p[2], p[3] },
+        1 => .{ p[0], p[1], p[2] + vector * v2(math.length(p[2] - p[3])), p[3] },
         else => @panic("Unsupported operation"),
-    }
+    } } };
 }
