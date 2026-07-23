@@ -121,8 +121,10 @@ pub const GenerationOptions = struct {
     coloring_rng_seed: u64 = 0,
     corner_angle_threshold: f64 = 3.0,
     orientation: OrientationType = .guess,
-    geometry_preprocess: bool = false,
-    /// Requires geometry preprocessing to be disabled
+    validate_shape: bool = false,
+    normalize_shape: bool = false,
+    orient_contours: bool = false,
+    /// Requires `orient_contours` to be disabled
     scanline_fill_rule: ?Scanline.FillRule = null,
     /// Only MSDFs (both their normal and their 10-bit versions) and MTSDFs can be error corrected
     error_correction_opts: ?ErrorCorrection.Options = .{},
@@ -196,7 +198,6 @@ fn handleVarFont(
         var coords = try allocator.alloc(ft.c.FT_Fixed, var_font.num_axis);
         defer allocator.free(coords);
         try face.getVarDesignCoords(coords);
-
         for (var_args) |args|
             for (var_font.axis[0..var_font.num_axis], 0..) |axis, i|
                 if (std.mem.eql(u8, std.mem.span(axis.name), args.name)) {
@@ -224,10 +225,7 @@ pub fn generateSingle(
     try face.loadGlyph(glyph_index, .{ .no_scale = true, .no_bitmap = true });
 
     var shape: Shape = .{};
-    defer {
-        for (shape.contours.items) |*contour| contour.edges.deinit(allocator);
-        shape.contours.deinit(allocator);
-    }
+    defer shape.deinit(allocator);
 
     var context: FreetypeContext = .{
         .allocator = allocator,
@@ -249,29 +247,47 @@ pub fn generateSingle(
         &context,
     ));
 
-    if (shape.contours.items.len != 0 and shape.contours.getLast().edges.items.len == 0)
-        _ = shape.contours.orderedRemove(shape.contours.items.len - 1);
+    const metrics = face.glyph().metrics();
+    if (shape.contours.items.len == 0)
+        return .{
+            .glyph_data = .{
+                .advance = scale * f64i(face.glyph().advance().x),
+                .bearing_x = scale * f64i(metrics.horiBearingX),
+                .bearing_y = scale * f64i(metrics.horiBearingY),
+                .width = 0,
+                .height = 0,
+            },
+            .pixels = &.{},
+        };
 
-    if (!shape.validate()) return error.InvalidShape;
-    if (gen_opts.geometry_preprocess) try shape.orientContours(allocator);
-    try shape.normalize(allocator);
+    var contour_it = std.mem.reverseIterator(shape.contours.items);
+    var i: isize = @intCast(shape.contours.items.len - 1);
+    while (contour_it.next()) |contour| : (i -= 1)
+        if (contour.edges.items.len == 0) {
+            _ = shape.contours.swapRemove(@intCast(i));
+        };
 
-    const f_px_size = f64i(gen_opts.px_size);
-    const px_range = f64i(gen_opts.px_range) / f_px_size;
+    if (gen_opts.validate_shape and !shape.validate()) return error.InvalidShape;
+    if (gen_opts.orient_contours) try shape.orientContours(allocator);
+    if (gen_opts.normalize_shape) try shape.normalize(allocator);
+
+    const px_size = f64i(gen_opts.px_size);
+    const px_range = f64i(gen_opts.px_range) / px_size;
 
     var bounds = shape.getBounds(0, 0, 0);
     if (bounds.left >= bounds.right or bounds.bottom >= bounds.top)
         bounds = .{ .left = 0, .bottom = 0, .right = 1, .top = 1 };
 
-    const w: u16 = @intFromFloat((bounds.right - bounds.left + px_range) * f_px_size);
-    const h: u16 = @intFromFloat((bounds.top - bounds.bottom + px_range) * f_px_size);
+    const bound_w = bounds.right - bounds.left;
+    const bound_h = bounds.top - bounds.bottom;
+    const w: u16 = @trunc((bound_w + px_range) * px_size);
+    const h: u16 = @trunc((bound_h + px_range) * px_size);
 
     const oob_point: Vec2 = if (gen_opts.orientation == .guess)
-        .{ bounds.left - (bounds.right - bounds.left) - 1, bounds.bottom - (bounds.top - bounds.bottom) - 1 }
+        .{ bounds.left - bound_w - 1, bounds.bottom - bound_h - 1 }
     else
         undefined;
 
-    const metrics = face.glyph().metrics();
     return .{
         .glyph_data = .{
             .advance = scale * f64i(face.glyph().advance().x),
@@ -301,28 +317,14 @@ pub fn generateAtlas(
     allocator: std.mem.Allocator,
     io: std.Io,
     codepoints: []const u21,
-    w: u16,
-    h: u16,
-    padding: u8,
+    atlas_w: u16,
+    atlas_h: u16,
+    glyph_padding: u8,
     use_kerning: bool,
     gen_opts: *const GenerationOptions,
 ) !AtlasData {
-    const face = try self.library.createFaceMemory(self.font_memory, 0);
-    defer face.deinit();
-
-    const face_flags = face.faceFlags();
-    try self.handleVarFont(face, allocator, gen_opts.var_font_args, face_flags);
-
     const glyphs = try allocator.alloc(AtlasGlyphData, codepoints.len);
     errdefer allocator.free(glyphs);
-
-    const char_indices = try allocator.alloc(u32, codepoints.len);
-    defer allocator.free(char_indices);
-
-    for (codepoints, char_indices) |c, *i|
-        i.* = face.getCharIndex(c) orelse return error.InvalidCodepoint;
-
-    const scale = 1.0 / f64i(face.unitsPerEM());
 
     var kernings: std.ArrayList(KerningPair) = .empty;
     errdefer kernings.deinit(allocator);
@@ -330,7 +332,10 @@ pub fn generateAtlas(
         if (!use_kerning)
             break :kerning;
 
-        if (!face_flags.kerning) {
+        const face = try self.library.createFaceMemory(self.font_memory, 0);
+        defer face.deinit();
+
+        if (!face.faceFlags().kerning) {
             std.log.warn(
                 \\Kerning requested, but none were found in the font file.
                 \\Note: FreeType doesn't have full support for GPOS kerning, you might want to populate the kern table off of the GPOS one with a font editor if you were expecting kerning to be present.
@@ -338,18 +343,21 @@ pub fn generateAtlas(
             break :kerning;
         }
 
-        for (char_indices, codepoints) |idx_a, codepoint_a|
-            for (char_indices, codepoints) |idx_b, codepoint_b|
-                if (idx_a != idx_b) {
-                    const kern = try face.getKerning(idx_a, idx_b, .unscaled);
-                    if (kern.x != 0 or kern.y != 0)
-                        try kernings.append(allocator, .{
-                            .codepoint_1 = codepoint_a,
-                            .codepoint_2 = codepoint_b,
-                            .x = scale * f64i(kern.x),
-                            .y = scale * f64i(kern.y),
-                        });
-                };
+        const scale = 1.0 / f64i(face.unitsPerEM());
+        for (codepoints) |codepoint_a| for (codepoints) |codepoint_b| {
+            const idx_a = face.getCharIndex(codepoint_a) orelse return error.InvalidCodepoint;
+            const idx_b = face.getCharIndex(codepoint_b) orelse return error.InvalidCodepoint;
+            if (idx_a != idx_b) {
+                const kern = try face.getKerning(idx_a, idx_b, .unscaled);
+                if (kern.x != 0 or kern.y != 0)
+                    try kernings.append(allocator, .{
+                        .codepoint_1 = codepoint_a,
+                        .codepoint_2 = codepoint_b,
+                        .x = scale * f64i(kern.x),
+                        .y = scale * f64i(kern.y),
+                    });
+            }
+        };
     }
 
     const id_rects = try allocator.alloc(pack.IdRect, codepoints.len);
@@ -366,11 +374,10 @@ pub fn generateAtlas(
     for (
         codepoints,
         glyphs,
-        char_indices,
         id_rects,
         rect_pixels,
         0..,
-    ) |codepoint, *glyph, char_idx, *id_rect, *rect_px, i| {
+    ) |codepoint, *glyph, *id_rect, *rect_px, i| {
         id_rect.id = @intCast(i);
         const args = .{
             self,
@@ -380,9 +387,7 @@ pub fn generateAtlas(
             glyph,
             id_rect,
             rect_px,
-            char_idx,
-            padding,
-            scale,
+            glyph_padding,
         };
 
         if (gen_opts.disable_concurrency)
@@ -392,15 +397,24 @@ pub fn generateAtlas(
     }
     try process_group.await(io);
 
-    var pack_ctx: pack.Context = try .create(allocator, w, h, .{});
+    var pack_ctx: pack.Context = try .create(allocator, atlas_w, atlas_h, .{});
     defer pack_ctx.deinit();
-    try pack.pack(pack.IdRect, &pack_ctx, id_rects, .{ .sortLessThanFn = sortLessThan });
+    try pack.pack(
+        pack.IdRect,
+        &pack_ctx,
+        id_rects,
+        .{ .sortLessThanFn = struct {
+            fn lessThan(_: void, a: pack.IdRect, b: pack.IdRect) bool {
+                return @max(a.rect.w, a.rect.h) > @max(b.rect.w, b.rect.h);
+            }
+        }.lessThan },
+    );
 
     const mod_channels = if (gen_opts.sdf_type == .msdf10)
         4
     else
         gen_opts.sdf_type.numChannels();
-    const pixels = try allocator.alloc(u8, @as(usize, w) * @as(usize, h) * @as(usize, mod_channels));
+    const pixels = try allocator.alloc(u8, @as(usize, atlas_w) * @as(usize, atlas_h) * @as(usize, mod_channels));
     errdefer allocator.free(pixels);
     @memset(pixels, 0);
 
@@ -411,13 +425,13 @@ pub fn generateAtlas(
         if (rect.w <= 0 or rect.h <= 0)
             continue;
 
-        const glyph_w: usize = @intCast(rect.w - padding * 2);
-        const glyph_h: usize = @intCast(rect.h - padding * 2);
-        const cur_atlas_x: usize = @intCast(rect.x + padding);
-        const cur_atlas_y: usize = @intCast(rect.y + padding);
+        const glyph_w: usize = @intCast(rect.w - glyph_padding * 2);
+        const glyph_h: usize = @intCast(rect.h - glyph_padding * 2);
+        const cur_atlas_x: usize = @intCast(rect.x + glyph_padding);
+        const cur_atlas_y: usize = @intCast(rect.y + glyph_padding);
 
         for (0..glyph_h) |j| {
-            const atlas_idx = ((cur_atlas_y + j) * w + cur_atlas_x) * mod_channels;
+            const atlas_idx = ((cur_atlas_y + j) * atlas_w + cur_atlas_x) * mod_channels;
             const src_idx = (j * glyph_w) * mod_channels;
             @memcpy(
                 pixels[atlas_idx .. atlas_idx + glyph_w * mod_channels],
@@ -444,9 +458,7 @@ fn processAtlasCodepoint(
     glyph: *AtlasGlyphData,
     id_rect: *pack.IdRect,
     rect_px: *[]const u8,
-    char_idx: u32,
     padding: u8,
-    scale: f64,
 ) std.Io.Cancelable!void {
     self.processAtlasCodepointInner(
         allocator,
@@ -454,9 +466,7 @@ fn processAtlasCodepoint(
         glyph,
         id_rect,
         rect_px,
-        char_idx,
         padding,
-        scale,
         codepoint,
     ) catch {
         if (@errorReturnTrace()) |trace| std.debug.dumpErrorReturnTrace(trace);
@@ -471,72 +481,18 @@ fn processAtlasCodepointInner(
     glyph: *AtlasGlyphData,
     id_rect: *pack.IdRect,
     rect_px: *[]const u8,
-    char_idx: u32,
     padding: u8,
-    scale: f64,
     codepoint: u21,
 ) !void {
-    const face = try self.library.createFaceMemory(self.font_memory, 0);
-    defer face.deinit();
-    try self.handleVarFont(face, allocator, gen_opts.var_font_args, face.faceFlags());
-
-    try face.loadGlyph(char_idx, .{ .no_scale = true, .no_bitmap = true });
-
-    var shape: Shape = .{};
-    defer {
-        for (shape.contours.items) |*contour| contour.edges.deinit(allocator);
-        shape.contours.deinit(allocator);
-    }
-
-    var context: FreetypeContext = .{
-        .allocator = allocator,
-        .scale = scale,
-        .shape = &shape,
-    };
-
-    const outline = face.glyph().outline().?;
-    try ft.intToError(ft.c.FT_Outline_Decompose(
-        outline.handle,
-        &.{
-            .move_to = ftMoveTo,
-            .line_to = ftLineTo,
-            .conic_to = ftConicTo,
-            .cubic_to = ftCubicTo,
-            .shift = 0,
-            .delta = 0,
-        },
-        &context,
-    ));
-
-    if (shape.contours.items.len != 0 and shape.contours.getLast().edges.items.len == 0)
-        _ = shape.contours.orderedRemove(shape.contours.items.len - 1);
-
-    if (!shape.validate()) return error.InvalidShape;
-    if (gen_opts.geometry_preprocess) try shape.orientContours(allocator);
-    try shape.normalize(allocator);
-
-    const f_px_size = f64i(gen_opts.px_size);
-    const px_range = f64i(gen_opts.px_range) / f_px_size;
-
-    var bounds = shape.getBounds(0, 0, 0);
-    if (bounds.left >= bounds.right or bounds.bottom >= bounds.top)
-        bounds = .{ .left = 0, .bottom = 0, .right = 1, .top = 1 };
-
-    const glyph_w: u16 = @intFromFloat((bounds.right - bounds.left + px_range) * f_px_size);
-    const glyph_h: u16 = @intFromFloat((bounds.top - bounds.bottom + px_range) * f_px_size);
-
-    const oob_point: Vec2 = if (gen_opts.orientation == .guess)
-        .{ bounds.left - (bounds.right - bounds.left) - 1, bounds.bottom - (bounds.top - bounds.bottom) - 1 }
-    else
-        undefined;
-
-    const metrics = face.glyph().metrics();
-    if (codepoint == ' ' or glyph_w == 0 or glyph_h == 0) {
+    const single_glyph = try self.generateSingle(allocator, codepoint, gen_opts);
+    const glyph_w = single_glyph.glyph_data.width;
+    const glyph_h = single_glyph.glyph_data.height;
+    if (glyph_w == 0 or glyph_h == 0) {
         glyph.* = .{
             .glyph_data = .{
-                .advance = scale * f64i(face.glyph().advance().x),
-                .bearing_x = scale * f64i(metrics.horiBearingX),
-                .bearing_y = scale * f64i(metrics.horiBearingY),
+                .advance = single_glyph.glyph_data.advance,
+                .bearing_x = single_glyph.glyph_data.bearing_x,
+                .bearing_y = single_glyph.glyph_data.bearing_y,
                 .width = 0.0,
                 .height = 0.0,
             },
@@ -547,30 +503,18 @@ fn processAtlasCodepointInner(
         return;
     }
 
-    rect_px.* = try getSdfPixels(
-        allocator,
-        gen_opts,
-        glyph_w,
-        glyph_h,
-        &shape,
-        .{
-            bounds.left - px_range / 2.0,
-            bounds.bottom - px_range / 2.0,
-        },
-        oob_point,
-    );
-
-    const padded_w = glyph_w + padding * 2;
-    const padded_h = glyph_h + padding * 2;
-    id_rect.rect = .{ .w = padded_w, .h = padded_h };
-
+    rect_px.* = single_glyph.pixels;
+    id_rect.rect = .{
+        .w = glyph_w + padding * 2,
+        .h = glyph_h + padding * 2,
+    };
     glyph.* = .{
         .glyph_data = .{
-            .advance = scale * f64i(face.glyph().advance().x),
-            .bearing_x = scale * f64i(metrics.horiBearingX),
-            .bearing_y = scale * f64i(metrics.horiBearingY),
-            .width = padded_w,
-            .height = padded_h,
+            .advance = single_glyph.glyph_data.advance,
+            .bearing_x = single_glyph.glyph_data.bearing_x,
+            .bearing_y = single_glyph.glyph_data.bearing_y,
+            .width = @intCast(id_rect.rect.w),
+            .height = @intCast(id_rect.rect.h),
         },
         .codepoint = codepoint,
         .tex_bounds = .{
@@ -582,11 +526,7 @@ fn processAtlasCodepointInner(
     };
 }
 
-fn sortLessThan(_: void, a: pack.IdRect, b: pack.IdRect) bool {
-    return @max(a.rect.w, a.rect.h) > @max(b.rect.w, b.rect.h);
-}
-
-fn getSdfPixelsInner(
+fn getSdfPixels(
     allocator: std.mem.Allocator,
     opts: *const GenerationOptions,
     w: u16,
@@ -594,9 +534,9 @@ fn getSdfPixelsInner(
     shape: *Shape,
     tfm: Vec2,
     oob_point: Vec2,
-) ![]const f64 {
-    const f_px_size = f64i(opts.px_size);
-    const px_range = f64i(opts.px_range) / f_px_size;
+) ![]const u8 {
+    const px_size = f64i(opts.px_size);
+    const px_range = f64i(opts.px_range) / px_size;
 
     var error_correction: ?ErrorCorrection = null;
     if (opts.sdf_type == .msdf or
@@ -608,39 +548,41 @@ fn getSdfPixelsInner(
     defer if (error_correction) |*ec| ec.destroy(allocator);
 
     const channels = opts.sdf_type.numChannels();
-    const pixels = try allocator.alloc(
+    const dist_pixels = try allocator.alloc(
         f64,
         @as(usize, w) * @as(usize, h) * @as(usize, if (opts.sdf_type == .msdf10) 4 else channels),
     );
+    defer allocator.free(dist_pixels);
+
     const invert_pixels = opts.orientation == .reverse or
         (opts.orientation == .guess and findDistanceAt(.sdf, shape.*, oob_point, px_range) > 0);
     switch (opts.sdf_type) {
         inline else => |ty| {
             if (ty == .msdf or ty == .msdf10 or ty == .mtsdf)
                 try coloring.colorShape(allocator, opts.coloring_rng_seed, shape, opts.corner_angle_threshold);
-            generate(ty, pixels, w, h, f_px_size, shape.*, px_range, tfm, invert_pixels);
+            generate(ty, dist_pixels, w, h, px_size, shape.*, px_range, tfm, invert_pixels);
         },
     }
 
-    if (!opts.geometry_preprocess)
+    if (!opts.orient_contours)
         if (opts.scanline_fill_rule) |fill_rule|
             switch (opts.sdf_type) {
                 .sdf, .psdf => try sdfSignCorrection(
                     allocator,
-                    pixels,
+                    dist_pixels,
                     w,
                     h,
-                    f_px_size,
+                    px_size,
                     shape.*,
                     tfm,
                     fill_rule,
                 ),
                 .msdf, .msdf10, .mtsdf => try msdfSignCorrection(
                     allocator,
-                    pixels,
+                    dist_pixels,
                     w,
                     h,
-                    f_px_size,
+                    px_size,
                     shape.*,
                     tfm,
                     fill_rule,
@@ -649,30 +591,7 @@ fn getSdfPixelsInner(
             };
 
     if (error_correction) |*ec|
-        ec.correct(shape, f_px_size, px_range, tfm, pixels, w, h, channels);
-
-    return pixels;
-}
-
-fn getSdfPixels(
-    allocator: std.mem.Allocator,
-    opts: *const GenerationOptions,
-    w: u16,
-    h: u16,
-    shape: *Shape,
-    tfm: Vec2,
-    oob_point: Vec2,
-) ![]const u8 {
-    const f_sdf_px = try getSdfPixelsInner(
-        allocator,
-        opts,
-        w,
-        h,
-        shape,
-        tfm,
-        oob_point,
-    );
-    defer allocator.free(f_sdf_px);
+        ec.correct(shape, px_size, px_range, tfm, dist_pixels, w, h, channels);
 
     const mod_channels = if (opts.sdf_type == .msdf10)
         4
@@ -684,13 +603,13 @@ fn getSdfPixels(
         const idx = y * w * mod_channels + x * mod_channels;
         if (opts.sdf_type == .msdf10)
             pixels[y * w * 4 + x * 4 ..][0..4].* = std.mem.toBytes(Msdf10Pixel{
-                .r = @trunc(std.math.maxInt(u10) * std.math.clamp(f_sdf_px[idx], 0.0, 1.0)),
-                .g = @trunc(std.math.maxInt(u10) * std.math.clamp(f_sdf_px[idx + 1], 0.0, 1.0)),
-                .b = @trunc(std.math.maxInt(u10) * std.math.clamp(f_sdf_px[idx + 2], 0.0, 1.0)),
+                .r = @trunc(std.math.maxInt(u10) * std.math.clamp(dist_pixels[idx], 0.0, 1.0)),
+                .g = @trunc(std.math.maxInt(u10) * std.math.clamp(dist_pixels[idx + 1], 0.0, 1.0)),
+                .b = @trunc(std.math.maxInt(u10) * std.math.clamp(dist_pixels[idx + 2], 0.0, 1.0)),
                 .a = std.math.maxInt(u2),
             })
         else for (0..mod_channels) |i|
-            pixels[idx + i] = @trunc(std.math.maxInt(u8) * std.math.clamp(f_sdf_px[idx + i], 0.0, 1.0));
+            pixels[idx + i] = @trunc(std.math.maxInt(u8) * std.math.clamp(dist_pixels[idx + i], 0.0, 1.0));
     };
     return pixels;
 }
@@ -733,8 +652,9 @@ fn msdfSignCorrection(
     var scanline: Scanline = .{};
     defer scanline.intersections.deinit(allocator);
 
-    var match_map = try allocator.alloc(i32, w * h);
+    const match_map = try allocator.alloc(i32, w * h);
     defer allocator.free(match_map);
+    @memset(match_map, 0);
 
     var ambiguous = false;
     var match_idx: usize = 0;
@@ -792,13 +712,12 @@ pub fn findDistanceAt(
     px_range: f64,
 ) switch (sdf_type) {
     .sdf, .psdf => f64,
-    .msdf, .msdf10 => [3]f64,
-    .mtsdf => [4]f64,
+    inline .msdf, .msdf10, .mtsdf => |ty| [ty.numChannels()]f64,
 } {
     var sdf_target: SignedDistance = .{};
     var psdf_target: [if (sdf_type == .psdf) 1 else 3]PsdfData = @splat(.{});
     for (shape.contours.items) |contour| for (contour.edges.items) |*edge| {
-        const dist, const param = edge.signedDistance(true, p);
+        const dist, const param = edge.signedDistance(p);
 
         switch (sdf_type) {
             .sdf, .mtsdf => {

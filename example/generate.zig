@@ -53,6 +53,8 @@ pub fn main(init: std.process.Init) !void {
         .px_size = 64,
         .px_range = 8,
         .coloring_rng_seed = seed,
+        .validate_shape = true,
+        .normalize_shape = true,
     };
 
     for ([_]u21{ 'A', 'B', 'C' }) |codepoint| {

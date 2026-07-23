@@ -20,6 +20,12 @@ pub const Bounds = struct {
 
 contours: std.ArrayList(Contour) = .empty,
 
+pub fn deinit(self: *Shape, allocator: std.mem.Allocator) void {
+    for (self.contours.items) |*contour|
+        contour.edges.deinit(allocator);
+    self.contours.deinit(allocator);
+}
+
 pub fn format(self: Shape, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     try writer.print("Number of contours: {}\n", .{self.contours.items.len});
     for (self.contours.items, 0..) |contour, i| {
@@ -58,9 +64,8 @@ pub fn normalize(self: *Shape, allocator: std.mem.Allocator) !void {
                     const factor = deconverge_overshoot *
                         @sqrt(1 - (corner_dot_epsilon - 1) * (corner_dot_epsilon - 1)) / (corner_dot_epsilon - 1);
                     var axis = math.normal(cur_dir - prev_dir, true) * math.v2(factor);
-                    if (math.cross(prev_edge.directionChange(1), edge.direction(0)) +
-                        math.cross(edge.directionChange(0), prev_edge.direction(1)) < 0)
-                        axis *= math.v2(-1.0);
+                    if (convergentCurveOrdering(prev_edge, edge))
+                        axis = -axis;
                     prev_edge.deconverge(1, math.ortho(axis, true));
                     edge.deconverge(0, math.ortho(axis, false));
                 }
@@ -163,4 +168,120 @@ pub fn orientContours(self: *Shape, allocator: std.mem.Allocator) !void {
     }
 
     for (self.contours.items, orientations.items) |*contour, orientation| if (orientation < 0) contour.reverse();
+}
+
+fn simplifyDegenerateCurve(ctrl: []Vec2, len: *u8) void {
+    const eql = std.meta.eql;
+    switch (len.*) {
+        3 => if ((eql(ctrl[1], ctrl[0]) or eql(ctrl[1], ctrl[3])) and
+            (eql(ctrl[2], ctrl[0]) or eql(ctrl[2], ctrl[3])))
+        {
+            ctrl[1] = ctrl[3];
+            len.* = 1;
+        },
+        2 => if (eql(ctrl[1], ctrl[0]) or eql(ctrl[1], ctrl[2])) {
+            ctrl[1] = ctrl[2];
+            len.* = 1;
+        },
+        1 => {
+            if (eql(ctrl[0], ctrl[1])) len.* = 0;
+        },
+        else => {},
+    }
+}
+
+fn convergentCurveOrdering(a: *const EdgeSegment, b: *const EdgeSegment) bool {
+    const eql = std.meta.eql;
+
+    var a_pts: [4]Vec2 = undefined;
+    var a_len: u8 = 0;
+    switch (a.segment) {
+        inline else => |pts| {
+            // these exclude zero
+            a_len = pts.len - 1;
+            @memcpy(a_pts[0..pts.len], &pts);
+        },
+    }
+
+    var b_pts: [4]Vec2 = undefined;
+    var b_len: u8 = 0;
+    switch (b.segment) {
+        inline else => |pts| {
+            b_len = pts.len - 1;
+            @memcpy(b_pts[0..pts.len], &pts);
+        },
+    }
+
+    if (!eql(a_pts[0], b_pts[0]))
+        return false;
+
+    simplifyDegenerateCurve(&a_pts, &a_len);
+    simplifyDegenerateCurve(&b_pts, &b_len);
+
+    var a1: Vec2 = a_pts[a_len - 1] - b_pts[0];
+    var b1: Vec2 = b_pts[1] - b_pts[0];
+    var a2: Vec2 = if (a_len >= 2) a_pts[a_len - 2] - a_pts[a_len - 1] - a1 else @splat(0.0);
+    var b2: Vec2 = if (b_len >= 2) b_pts[2] - b_pts[1] - b1 else @splat(0.0);
+    var a3: Vec2 = @splat(0.0);
+    var b3: Vec2 = @splat(0.0);
+    if (a_len >= 3) {
+        a3 = a_pts[a_len - 3] - a_pts[a_len - 2] - (a_pts[a_len - 2] - a_pts[a_len - 1]) - a2;
+        a2 *= math.v2(3.0);
+    }
+
+    if (b_len >= 3) {
+        b3 = b_pts[3] - b_pts[2] - (b_pts[2] - b_pts[1]) - b2;
+        b2 *= math.v2(3.0);
+    }
+
+    a1 *= math.v2(a_len);
+    b1 *= math.v2(b_len);
+
+    const a_filled = !eql(a1, @splat(0.0));
+    const b_filled = !eql(b1, @splat(0.0));
+    if (a_filled and b_filled) {
+        const as = math.length(a1);
+        const bs = math.length(b1);
+
+        inline for (.{
+            as * math.cross(a1, b2) + bs * math.cross(a2, b1),
+            as * as * math.cross(a1, b3) + as * bs * math.cross(a2, b2) + bs * bs * math.cross(a3, b1),
+            as * math.cross(a2, b3) + bs * math.cross(a3, b2),
+            math.cross(a3, b3),
+        }) |derivative| {
+            if (derivative < 0.0) return true;
+            if (derivative > 0.0) return false;
+        }
+    }
+
+    var flip = false;
+    if (a_filled) {
+        std.mem.swap(Vec2, &a1, &b1);
+        std.mem.swap(Vec2, &a2, &b2);
+        std.mem.swap(Vec2, &a3, &b3);
+        flip = true;
+    }
+
+    if (b_filled) {
+        inline for (.{
+            math.cross(a3, b1),
+            math.cross(a2, b2),
+            math.cross(a3, b2),
+            math.cross(a2, b3),
+            math.cross(a3, b3),
+        }) |derivative| {
+            if (derivative < 0.0) return !flip;
+            if (derivative > 0.0) return flip;
+        }
+    }
+
+    inline for (.{
+        @sqrt(math.length(a2)) * math.cross(a2, b3) + @sqrt(math.length(b2)) * math.cross(a3, b2),
+        math.cross(a3, b3),
+    }) |derivative| {
+        if (derivative < 0.0) return true;
+        if (derivative > 0.0) return false;
+    }
+
+    return false;
 }

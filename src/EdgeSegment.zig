@@ -142,10 +142,7 @@ pub fn directionChange(self: EdgeSegment, comptime index: u1) Vec2 {
     }
 }
 
-pub fn signedDistance(self: EdgeSegment, comptime want_param: bool, origin: Vec2) if (want_param)
-    struct { SignedDistance, f64 }
-else
-    SignedDistance {
+pub fn signedDistance(self: EdgeSegment, origin: Vec2) struct { SignedDistance, f64 } {
     switch (self.segment) {
         .linear => |p| {
             const aq = origin - p[0];
@@ -155,16 +152,17 @@ else
             const endpoint_dist = math.length(eq);
             if (param > 0.0 and param < 1.0) {
                 const ortho_dist = dot(math.orthonormal(ab, false, true), aq);
-                if (@abs(ortho_dist) < endpoint_dist) {
-                    const signed_dist: SignedDistance = .{ .distance = ortho_dist };
-                    return if (want_param) .{ signed_dist, param } else signed_dist;
-                }
+                if (@abs(ortho_dist) < endpoint_dist)
+                    return .{ .{ .distance = ortho_dist }, param };
             }
-            const signed_dist: SignedDistance = .{
-                .distance = math.nonZeroSign(cross(aq, ab)) * endpoint_dist,
-                .dot = @abs(dot(normal(ab, true), normal(eq, true))),
+
+            return .{
+                .{
+                    .distance = math.nonZeroSign(cross(aq, ab)) * endpoint_dist,
+                    .dot = @abs(dot(normal(ab, true), normal(eq, true))),
+                },
+                param,
             };
-            return if (want_param) .{ signed_dist, param } else signed_dist;
         },
         .quadratic_bezier => |p| {
             const qa = p[0] - origin;
@@ -196,25 +194,27 @@ else
                 }
             };
 
-            const signed_dist: SignedDistance = if (param < 0.0)
-                .{
-                    .distance = min_dist,
-                    .dot = @abs(dot(
-                        normal(self.direction(0), true),
-                        normal(qa, true),
-                    )),
-                }
-            else if (param > 1.0)
-                .{
-                    .distance = min_dist,
-                    .dot = @abs(dot(
-                        normal(self.direction(1), true),
-                        normal(p[2] - origin, true),
-                    )),
-                }
-            else
-                .{ .distance = min_dist };
-            return if (want_param) .{ signed_dist, param } else signed_dist;
+            return .{
+                if (param < 0.0)
+                    .{
+                        .distance = min_dist,
+                        .dot = @abs(dot(
+                            normal(self.direction(0), true),
+                            normal(qa, true),
+                        )),
+                    }
+                else if (param > 1.0)
+                    .{
+                        .distance = min_dist,
+                        .dot = @abs(dot(
+                            normal(self.direction(1), true),
+                            normal(p[2] - origin, true),
+                        )),
+                    }
+                else
+                    .{ .distance = min_dist },
+                param,
+            };
         },
         .cubic_bezier => |p| {
             const qa = p[0] - origin;
@@ -255,25 +255,27 @@ else
                 }
             }
 
-            const signed_dist: SignedDistance = if (param < 0.0)
-                .{
-                    .distance = min_dist,
-                    .dot = @abs(dot(
-                        normal(self.direction(0), true),
-                        normal(qa, true),
-                    )),
-                }
-            else if (param > 1.0)
-                .{
-                    .distance = min_dist,
-                    .dot = @abs(dot(
-                        normal(self.direction(1), true),
-                        normal(p[3] - origin, true),
-                    )),
-                }
-            else
-                .{ .distance = min_dist };
-            return if (want_param) .{ signed_dist, param } else signed_dist;
+            return .{
+                if (param < 0.0)
+                    .{
+                        .distance = min_dist,
+                        .dot = @abs(dot(
+                            normal(self.direction(0), true),
+                            normal(qa, true),
+                        )),
+                    }
+                else if (param > 1.0)
+                    .{
+                        .distance = min_dist,
+                        .dot = @abs(dot(
+                            normal(self.direction(1), true),
+                            normal(p[3] - origin, true),
+                        )),
+                    }
+                else
+                    .{ .distance = min_dist },
+                param,
+            };
         },
     }
 }
@@ -305,14 +307,15 @@ pub fn scanlineIntersections(self: EdgeSegment, x: *[3]f64, dy: *[3]i32, y: f64)
             var roots: [2]f64 = undefined;
             const num_solutions = equations.solveQuadratic(&roots, br[1], 2 * ab[1], p[0][1] - y);
             if (num_solutions >= 2 and roots[0] > roots[1]) std.mem.swap(f64, &roots[0], &roots[1]);
-            for (roots[0..num_solutions]) |root| if (root >= 0 and root <= 1) {
-                x[total] = p[0][0] + 2 * root * ab[0] + root * root * br[0];
-                if (@as(f64, @floatFromInt(next_dy)) * (ab[1] + root * br[1]) >= 0) {
-                    dy[total] = next_dy;
-                    total += 1;
-                    next_dy = -next_dy;
-                }
-            };
+            for (roots[0..num_solutions]) |root|
+                if (total < 2 and root >= 0 and root <= 1) {
+                    x[total] = p[0][0] + 2 * root * ab[0] + root * root * br[0];
+                    if (@as(f64, @floatFromInt(next_dy)) * (ab[1] + root * br[1]) >= 0) {
+                        dy[total] = next_dy;
+                        total += 1;
+                        next_dy = -next_dy;
+                    }
+                };
 
             if (p[2][1] == y) {
                 if (next_dy > 0 and total > 0) {
@@ -366,14 +369,15 @@ pub fn scanlineIntersections(self: EdgeSegment, x: *[3]f64, dy: *[3]i32, y: f64)
                 }
             }
 
-            for (roots[0..num_solutions]) |root| if (root >= 0 and root <= 1) {
-                x[total] = p[0][0] + 3 * root * ab[0] + 3 * root * root * br[0] + root * root * root * as[0];
-                if (@as(f64, @floatFromInt(next_dy)) * (ab[1] + 2 * root * br[1] + root * root * as[1]) >= 0) {
-                    dy[total] = next_dy;
-                    total += 1;
-                    next_dy = -next_dy;
-                }
-            };
+            for (roots[0..num_solutions]) |root|
+                if (total < 3 and root >= 0 and root <= 1) {
+                    x[total] = p[0][0] + 3 * root * ab[0] + 3 * root * root * br[0] + root * root * root * as[0];
+                    if (@as(f64, @floatFromInt(next_dy)) * (ab[1] + 2 * root * br[1] + root * root * as[1]) >= 0) {
+                        dy[total] = next_dy;
+                        total += 1;
+                        next_dy = -next_dy;
+                    }
+                };
 
             if (p[3][1] == y) {
                 if (next_dy > 0 and total > 0) {
@@ -407,12 +411,10 @@ pub fn scanlineIntersections(self: EdgeSegment, x: *[3]f64, dy: *[3]i32, y: f64)
 }
 
 fn pointBounds(p: Vec2, l: *f64, b: *f64, r: *f64, t: *f64) void {
-    const x = p[0];
-    const y = p[1];
-    if (x < l.*) l.* = x;
-    if (y < b.*) b.* = y;
-    if (x > r.*) r.* = x;
-    if (y > t.*) t.* = y;
+    l.* = @min(l.*, p[0]);
+    b.* = @min(b.*, p[1]);
+    r.* = @max(r.*, p[0]);
+    t.* = @max(t.*, p[1]);
 }
 
 pub fn bound(self: EdgeSegment, l: *f64, b: *f64, r: *f64, t: *f64) void {
@@ -439,7 +441,7 @@ pub fn bound(self: EdgeSegment, l: *f64, b: *f64, r: *f64, t: *f64) void {
             pointBounds(p[3], l, b, r, t);
             const a0 = p[1] - p[0];
             const a1 = (p[2] - p[1] - a0) * v2(2.0);
-            const a2 = p[3] - (p[2] * v2(3.0) + p[1] * v2(3.0)) - p[0];
+            const a2 = p[3] - p[2] * v2(3.0) + p[1] * v2(3.0) - p[0];
             var roots: [2]f64 = undefined;
             var roots_len = equations.solveQuadratic(&roots, a2[0], a1[0], a0[0]);
             for (roots[0..roots_len]) |root| if (root > 0 and root < 1) pointBounds(self.point(root), l, b, r, t);
@@ -560,8 +562,8 @@ pub fn deconverge(self: *EdgeSegment, param: u32, vector: Vec2) void {
 
     const p = self.segment.cubic_bezier;
     switch (param) {
-        0 => self.segment.cubic_bezier[1] = p[1] + v2(math.length(vector * (p[1] - p[0]))),
-        1 => self.segment.cubic_bezier[2] = p[2] + v2(math.length(vector * (p[2] - p[3]))),
+        0 => self.segment.cubic_bezier[1] = p[1] + v2(math.length(p[1] - p[0])) * vector,
+        1 => self.segment.cubic_bezier[2] = p[2] + v2(math.length(p[2] - p[3])) * vector,
         else => @panic("Unsupported operation"),
     }
 }

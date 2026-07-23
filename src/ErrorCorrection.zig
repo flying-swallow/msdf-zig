@@ -206,32 +206,32 @@ fn protectEdges(
     sdf_h: u16,
     channels: u8,
 ) void {
-    for (0..sdf_h) |y| for (0..sdf_w - 1) |x| {
+    for (0..sdf_h) |y| {
         const left = sdf_px[index(0, y, sdf_w, channels)..][0..3];
         const right = sdf_px[index(1, y, sdf_w, channels)..][0..3];
         const median_left = median(left);
         const median_right = median(right);
-        if (@abs(median_left - 0.5) + @abs(median_right - 0.5) < radius) {
+        for (0..sdf_w - 1) |x| if (@abs(median_left - 0.5) + @abs(median_right - 0.5) < radius) {
             const mask = edgeBetweenTexels(left, right);
             protectExtremeChannels(&self.stencil[index(x, y, self.stencil_w, 1)], left, median_left, mask);
             protectExtremeChannels(&self.stencil[index(x + 1, y, self.stencil_w, 1)], right, median_right, mask);
-        }
-    };
+        };
+    }
 
-    for (0..sdf_h - 1) |y| for (0..sdf_w) |x| {
+    for (0..sdf_h - 1) |y| {
         const bottom = sdf_px[index(0, y, sdf_w, channels)..][0..3];
         const top = sdf_px[index(0, y + 1, sdf_w, channels)..][0..3];
         const median_bottom = median(bottom);
         const median_top = median(top);
-        if (@abs(median_bottom - 0.5) + @abs(median_top - 0.5) < radius) {
+        for (0..sdf_w) |x| if (@abs(median_bottom - 0.5) + @abs(median_top - 0.5) < radius) {
             const mask = edgeBetweenTexels(bottom, top);
             protectExtremeChannels(&self.stencil[index(x, y, self.stencil_w, 1)], bottom, median_bottom, mask);
             protectExtremeChannels(&self.stencil[index(x, y + 1, self.stencil_w, 1)], top, median_top, mask);
-        }
-    };
+        };
+    }
 
     const diag_radius = radius * @sqrt(2.0);
-    for (0..sdf_h - 1) |y| for (0..sdf_w - 1) |x| {
+    for (0..sdf_h - 1) |y| {
         const bottom_left = sdf_px[index(0, y, sdf_w, channels)..][0..3];
         const bottom_right = sdf_px[index(1, y, sdf_w, channels)..][0..3];
         const top_left = sdf_px[index(0, y + 1, sdf_w, channels)..][0..3];
@@ -240,17 +240,19 @@ fn protectEdges(
         const median_bottom_right = median(bottom_right);
         const median_top_left = median(top_left);
         const median_top_right = median(top_right);
-        if (@abs(median_bottom_left - 0.5) + @abs(median_top_right - 0.5) < diag_radius) {
-            const mask = edgeBetweenTexels(bottom_left, top_right);
-            protectExtremeChannels(&self.stencil[index(x, y, self.stencil_w, 1)], bottom_left, median_bottom_left, mask);
-            protectExtremeChannels(&self.stencil[index(x + 1, y + 1, self.stencil_w, 1)], top_right, median_top_right, mask);
+        for (0..sdf_w - 1) |x| {
+            if (@abs(median_bottom_left - 0.5) + @abs(median_top_right - 0.5) < diag_radius) {
+                const mask = edgeBetweenTexels(bottom_left, top_right);
+                protectExtremeChannels(&self.stencil[index(x, y, self.stencil_w, 1)], bottom_left, median_bottom_left, mask);
+                protectExtremeChannels(&self.stencil[index(x + 1, y + 1, self.stencil_w, 1)], top_right, median_top_right, mask);
+            }
+            if (@abs(median_bottom_right - 0.5) + @abs(median_top_left - 0.5) < diag_radius) {
+                const mask = edgeBetweenTexels(bottom_right, top_left);
+                protectExtremeChannels(&self.stencil[index(x + 1, y, self.stencil_w, 1)], bottom_right, median_bottom_right, mask);
+                protectExtremeChannels(&self.stencil[index(x, y + 1, self.stencil_w, 1)], top_left, median_top_left, mask);
+            }
         }
-        if (@abs(median_bottom_right - 0.5) + @abs(median_top_left - 0.5) < diag_radius) {
-            const mask = edgeBetweenTexels(bottom_right, top_left);
-            protectExtremeChannels(&self.stencil[index(x + 1, y, self.stencil_w, 1)], bottom_right, median_bottom_right, mask);
-            protectExtremeChannels(&self.stencil[index(x, y + 1, self.stencil_w, 1)], top_left, median_top_left, mask);
-        }
-    };
+    }
 }
 
 fn interpolatedMedianBilinear(a: *const [3]f64, l: *const [3]f64, q: *const [3]f64, t: f64) f64 {
@@ -262,9 +264,9 @@ fn interpolatedMedianBilinear(a: *const [3]f64, l: *const [3]f64, q: *const [3]f
 }
 
 fn rangeTest(span: f64, protected: bool, at: f64, bt: f64, xt: f64, am: f64, bm: f64, xm: f64) ClassifierFlags {
-    if (!(am > 0.5 and bm > 0.5 and xm <= 0.5) or
+    if (!((am > 0.5 and bm > 0.5 and xm <= 0.5) or
         (am < 0.5 and bm < 0.5 and xm >= 0.5) or
-        (!protected and math.median(am, bm, xm) != xm))
+        (!protected and math.median(am, bm, xm) != xm)))
         return .{};
 
     const ax_span = (xt - at) * span;
@@ -426,7 +428,6 @@ fn hasDiagonalArtifact(
         d[1] + abc[1],
         d[2] + abc[2],
     };
-    if (q[0] == 0.0 or q[1] == 0.0 or q[2] == 0.0) return false;
 
     const l: [3]f64 = .{
         -a[0] - abc[0],

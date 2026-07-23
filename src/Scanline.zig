@@ -43,12 +43,12 @@ pub fn overlap(a: Scanline, b: Scanline, x_from: f64, x_to: f64, fill_rule: Fill
     while (ax < x_from or bx < x_from) {
         const x_next = @min(ax, bx);
         if (ax == x_next and ai < a.intersections.items.len) {
-            a_inside = interpretFillRule(a.intersections.items[ai].direction, fill_rule);
+            a_inside = interpretFillRule(a.intersections.items[ai].dir, fill_rule);
             ai += 1;
             ax = if (ai < a.intersections.items.len) a.intersections[ai].x else x_to;
         }
         if (bx == x_next and bi < b.intersections.items.len) {
-            b_inside = interpretFillRule(b.intersections[bi].direction, fill_rule);
+            b_inside = interpretFillRule(b.intersections[bi].dir, fill_rule);
             bi += 1;
             bx = if (bi < b.intersections.items.len) b.intersections[bi].x else x_to;
         }
@@ -58,12 +58,12 @@ pub fn overlap(a: Scanline, b: Scanline, x_from: f64, x_to: f64, fill_rule: Fill
         const x_next = @min(ax, bx);
         if (a_inside == b_inside) total += x_next - x;
         if (ax == x_next and ai < a.intersections.items.len) {
-            a_inside = interpretFillRule(a.intersections[ai].direction, fill_rule);
+            a_inside = interpretFillRule(a.intersections[ai].dir, fill_rule);
             ai += 1;
             ax = if (ai < a.intersections.items.len) a.intersections[ai].x else x_to;
         }
         if (bx == x_next and bi < b.intersections.items.len) {
-            b_inside = interpretFillRule(b.intersections[bi].direction, fill_rule);
+            b_inside = interpretFillRule(b.intersections[bi].dir, fill_rule);
             bi += 1;
             bx = if (bi < b.intersections.items.len) b.intersections[bi].x else x_to;
         }
