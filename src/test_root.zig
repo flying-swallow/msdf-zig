@@ -4,7 +4,7 @@
 //! test files can reach the implementation they exercise.
 
 test {
-    _ = @import("test/differential.zig");
+    _ = @import("test/rasterize.zig");
     _ = @import("convergent_curve_ordering.zig");
     _ = @import("edge_color.zig");
     _ = @import("pixel_conversion.zig");

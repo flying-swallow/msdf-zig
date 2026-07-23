@@ -147,18 +147,15 @@ bool generateOne(const Config &cfg, const std::string &outDir, FreetypeHandle *f
     SDFTransformation transformation(projection, Range(pxRange));
 
     MSDFGeneratorConfig genConfig;
-    genConfig.overlapSupport = false; // msdf-zig has no contour combiners
+    genConfig.overlapSupport = true;
     genConfig.errorCorrection.mode = cfg.errorCorrection
         ? ErrorCorrectionConfig::EDGE_PRIORITY
         : ErrorCorrectionConfig::DISABLED;
-    // msdf-zig's check_distance defaults to ON and is forced OFF when a scanline
-    // pass runs (ErrorCorrection.zig:28, 73-76). It runs a single findErrors with
-    // the shape-distance check folded into the classifier (ErrorCorrection.zig:109),
-    // which is what ALWAYS_CHECK_DISTANCE does here -- CHECK_DISTANCE_AT_EDGE would
-    // additionally run the shapeless pass and protectAll.
+    // Match msdfgen's default, CHECK_DISTANCE_AT_EDGE. A scanline pass corrects
+    // signs afterwards, so the Zig implementation disables exact checks then.
     genConfig.errorCorrection.distanceCheckMode = cfg.scanlineFillRule
         ? ErrorCorrectionConfig::DO_NOT_CHECK_DISTANCE
-        : ErrorCorrectionConfig::ALWAYS_CHECK_DISTANCE;
+        : ErrorCorrectionConfig::CHECK_DISTANCE_AT_EDGE;
 
     int channels = channelsOf(cfg.type);
     std::vector<float> flat;

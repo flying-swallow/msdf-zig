@@ -2,7 +2,9 @@ const std = @import("std");
 
 const SignedDistance = @This();
 
-distance: f64 = std.math.floatMax(f64),
+// msdfgen uses -DBL_MAX. The sign matters for empty selectors and for the
+// overlapping-contour combiner, even though comparisons use absolute value.
+distance: f64 = -std.math.floatMax(f64),
 dot: f64 = 0,
 
 pub fn lessThan(self: SignedDistance, other: SignedDistance) bool {
