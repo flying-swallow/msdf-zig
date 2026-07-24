@@ -237,7 +237,7 @@ pub fn generateSingle(
         &context,
     ));
 
-    if (shape.contours.items.len != 0 and shape.contours.getLast().?.edges.items.len == 0)
+    if (shape.contours.items.len != 0 and shape.contours.items[shape.contours.items.len - 1].edges.items.len == 0)
         _ = shape.contours.orderedRemove(shape.contours.items.len - 1);
 
     if (!shape.validate()) return error.InvalidShape;
@@ -789,7 +789,10 @@ fn generateSdf(allocator: std.mem.Allocator, out_pixels: []f64, w: u16, h: u16, 
         const row = h - y - 1;
         for (0..w) |x| {
             var selector: edge_selectors.TrueDistanceSelector = .init(samplePoint(x, y, scale, tx, ty));
-            const distance = if (overlap_support) edge_selectors.accumulateOverlapping(edge_selectors.TrueDistanceSelector, selectors, shape, selector.p).distance() else b: { edge_selectors.accumulate(&selector, shape); break :b selector.distance(); };
+            const distance = if (overlap_support) edge_selectors.accumulateOverlapping(edge_selectors.TrueDistanceSelector, selectors, shape, selector.p).distance() else b: {
+                edge_selectors.accumulate(&selector, shape);
+                break :b selector.distance();
+            };
             out_pixels[row * w + x] = mapDistance(distance, px_range, invert_pixels);
         }
     }
@@ -802,7 +805,10 @@ fn generatePsdf(allocator: std.mem.Allocator, out_pixels: []f64, w: u16, h: u16,
         const row = h - y - 1;
         for (0..w) |x| {
             var selector: edge_selectors.PerpendicularDistanceSelector = .init(samplePoint(x, y, scale, tx, ty));
-            const distance = if (overlap_support) edge_selectors.accumulateOverlapping(edge_selectors.PerpendicularDistanceSelector, selectors, shape, selector.p).distance() else b: { edge_selectors.accumulate(&selector, shape); break :b selector.distance(); };
+            const distance = if (overlap_support) edge_selectors.accumulateOverlapping(edge_selectors.PerpendicularDistanceSelector, selectors, shape, selector.p).distance() else b: {
+                edge_selectors.accumulate(&selector, shape);
+                break :b selector.distance();
+            };
             out_pixels[row * w + x] = mapDistance(distance, px_range, invert_pixels);
         }
     }
@@ -816,7 +822,10 @@ fn generateMsdf(allocator: std.mem.Allocator, out_pixels: []f64, w: u16, h: u16,
         const row = h - y - 1;
         for (0..w) |x| {
             var selector: edge_selectors.MultiDistanceSelector = .init(samplePoint(x, y, scale, tx, ty));
-            const md = if (overlap_support) edge_selectors.accumulateOverlapping(edge_selectors.MultiDistanceSelector, selectors, shape, selector.p).distance() else b: { edge_selectors.accumulate(&selector, shape); break :b selector.distance(); };
+            const md = if (overlap_support) edge_selectors.accumulateOverlapping(edge_selectors.MultiDistanceSelector, selectors, shape, selector.p).distance() else b: {
+                edge_selectors.accumulate(&selector, shape);
+                break :b selector.distance();
+            };
 
             const out = out_pixels[row * w * channels + x * channels ..][0..3];
             out[0] = mapDistance(md.r, px_range, invert_pixels);
@@ -834,7 +843,10 @@ fn generateMtsdf(allocator: std.mem.Allocator, out_pixels: []f64, w: u16, h: u16
         const row = h - y - 1;
         for (0..w) |x| {
             var selector: edge_selectors.MultiDistanceSelector = .init(samplePoint(x, y, scale, tx, ty));
-            const mtd = if (overlap_support) edge_selectors.accumulateOverlapping(edge_selectors.MultiDistanceSelector, selectors, shape, selector.p).multiAndTrueDistance() else b: { edge_selectors.accumulate(&selector, shape); break :b selector.multiAndTrueDistance(); };
+            const mtd = if (overlap_support) edge_selectors.accumulateOverlapping(edge_selectors.MultiDistanceSelector, selectors, shape, selector.p).multiAndTrueDistance() else b: {
+                edge_selectors.accumulate(&selector, shape);
+                break :b selector.multiAndTrueDistance();
+            };
 
             const out = out_pixels[row * w * channels + x * channels ..][0..4];
             out[0] = mapDistance(mtd.r, px_range, invert_pixels);

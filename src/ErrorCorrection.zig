@@ -122,7 +122,8 @@ pub fn correct(
     // run before `protectAll`; the exact-distance pass then only evaluates the
     // remaining edge candidates for the default `.at_edge` mode.
     if (self.options.distance_check_mode == .never or
-        (self.options.distance_check_mode == .at_edge and self.options.mode != .edge_only)) {
+        (self.options.distance_check_mode == .at_edge and self.options.mode != .edge_only))
+    {
         self.dist_eval.check_distance = false;
         self.findErrors(scale, px_range, vtx, sdf_px, sdf_w, sdf_h, channels);
         if (self.options.distance_check_mode == .at_edge) {
@@ -144,7 +145,7 @@ pub fn protectCorners(self: *ErrorCorrection, shape: *Shape, scale: f64, vtx: Ve
     for (shape.contours.items) |contour| {
         if (contour.edges.items.len == 0) continue;
 
-        var prev_edge = contour.edges.getLast().?;
+        var prev_edge = contour.edges.items[contour.edges.items.len - 1];
         for (contour.edges.items) |edge| {
             // Widened to i32 to match the C++: at commonColor 0 this relies on
             // 0 & -1 == 0, which a u8 would trap on instead.

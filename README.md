@@ -38,13 +38,10 @@ This library might provide an option for it later, but you currently need to pre
 
 ## Changes
 
-### Edge coloring is now deterministic and msdfgen-compatible
+### Edge coloring is deterministic
 
-`GenerationOptions.coloring_rng_seed` is now `coloring_seed`. Coloring previously
-used a module-global PRNG, which both diverged from msdfgen's colorings for every
-seed and made `generateSingle`/`generateAtlas` non-reentrant. It now uses
-msdfgen's own seed-driven scheme, so a given seed reproduces msdfgen's coloring
-exactly and generation is thread-safe.
-
-The default seed of `0` still produces a valid coloring, but not the same one as
-before — regenerate any cached atlases.
+`GenerationOptions.coloring_rng_seed` is now `coloring_seed`. The seed initializes
+Zig's default Xoshiro256 PRNG for each shape, keeping generation reentrant and
+thread-safe while producing better-distributed color choices than msdfgen's
+custom seed extractor. The output intentionally does not match msdfgen exactly;
+regenerate any cached atlases after upgrading.
