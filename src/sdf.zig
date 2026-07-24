@@ -73,12 +73,14 @@ pub const GenerationOptions = struct {
     sdf_type: SdfType,
     px_size: u16,
     px_range: u16,
-    /// Selects one of the deterministic edge colorings. Not an RNG seed: the
-    /// same value always yields the same coloring, matching msdfgen.
+    /// Seed for deterministic randomized edge coloring.
     coloring_seed: u64 = 0,
     corner_angle_threshold: f64 = 3.0,
     orientation: OrientationType = .guess,
     geometry_preprocess: bool = false,
+    /// Use msdfgen's overlapping-contour combiner. This is currently retained
+    /// for API compatibility; the geometry pipeline below implements it.
+    overlap_support: bool = true,
     /// Requires geometry preprocessing to be disabled
     scanline_fill_rule: ?Scanline.FillRule = null,
     /// Only MSDFs and MTSDFs can be error corrected
@@ -157,7 +159,7 @@ fn getSdfPixelsInner(
 
     var error_correction: ?ErrorCorrection =
         if (opts.error_correction_opts) |ec_opts| b: {
-            break :b if (opts.sdf_type == .msdf or opts.sdf_type == .mtsdf)
+            break :b if (opts.sdf_type == .msdf or opts.sdf_type == .msdf10 or opts.sdf_type == .mtsdf)
                 try .create(allocator, shape, w, h, ec_opts, opts.scanline_fill_rule != null)
             else
                 null;
@@ -170,15 +172,15 @@ fn getSdfPixelsInner(
     const invert_pixels = opts.orientation == .reverse or
         (opts.orientation == .guess and findDistanceAt(shape.*, oob_point, px_range) > 0);
     switch (opts.sdf_type) {
-        .sdf => generateSdf(pixels, w, h, f_px_size, shape.*, px_range, translate_x, translate_y, invert_pixels),
-        .psdf => generatePsdf(pixels, w, h, f_px_size, shape.*, px_range, translate_x, translate_y, invert_pixels),
+        .sdf => try generateSdf(allocator, pixels, w, h, f_px_size, shape.*, px_range, translate_x, translate_y, invert_pixels, opts.overlap_support),
+        .psdf => try generatePsdf(allocator, pixels, w, h, f_px_size, shape.*, px_range, translate_x, translate_y, invert_pixels, opts.overlap_support),
         .msdf, .msdf10 => {
             try coloring.colorShape(allocator, shape, opts.corner_angle_threshold, opts.coloring_seed);
-            generateMsdf(pixels, w, h, f_px_size, shape.*, px_range, translate_x, translate_y, invert_pixels);
+            try generateMsdf(allocator, pixels, w, h, f_px_size, shape.*, px_range, translate_x, translate_y, invert_pixels, opts.overlap_support);
         },
         .mtsdf => {
             try coloring.colorShape(allocator, shape, opts.corner_angle_threshold, opts.coloring_seed);
-            generateMtsdf(pixels, w, h, f_px_size, shape.*, px_range, translate_x, translate_y, invert_pixels);
+            try generateMtsdf(allocator, pixels, w, h, f_px_size, shape.*, px_range, translate_x, translate_y, invert_pixels, opts.overlap_support);
         },
     }
 
@@ -399,36 +401,41 @@ fn samplePoint(x: usize, y: usize, scale: f64, tx: f64, ty: f64) Vec2 {
     };
 }
 
-fn generateSdf(out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px_range: f64, tx: f64, ty: f64, invert_pixels: bool) void {
+fn generateSdf(allocator: std.mem.Allocator, out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px_range: f64, tx: f64, ty: f64, invert_pixels: bool, overlap_support: bool) !void {
+    const selectors = try allocator.alloc(edge_selectors.TrueDistanceSelector, if (overlap_support) shape.contours.items.len else 0);
+    defer allocator.free(selectors);
     for (0..h) |y| {
         const row = h - y - 1;
         for (0..w) |x| {
             var selector: edge_selectors.TrueDistanceSelector = .init(samplePoint(x, y, scale, tx, ty));
-            edge_selectors.accumulate(&selector, shape);
-            out_pixels[row * w + x] = mapDistance(selector.distance(), px_range, invert_pixels);
+            const distance = if (overlap_support) edge_selectors.accumulateOverlapping(edge_selectors.TrueDistanceSelector, selectors, shape, selector.p).distance() else b: { edge_selectors.accumulate(&selector, shape); break :b selector.distance(); };
+            out_pixels[row * w + x] = mapDistance(distance, px_range, invert_pixels);
         }
     }
 }
 
-fn generatePsdf(out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px_range: f64, tx: f64, ty: f64, invert_pixels: bool) void {
+fn generatePsdf(allocator: std.mem.Allocator, out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px_range: f64, tx: f64, ty: f64, invert_pixels: bool, overlap_support: bool) !void {
+    const selectors = try allocator.alloc(edge_selectors.PerpendicularDistanceSelector, if (overlap_support) shape.contours.items.len else 0);
+    defer allocator.free(selectors);
     for (0..h) |y| {
         const row = h - y - 1;
         for (0..w) |x| {
             var selector: edge_selectors.PerpendicularDistanceSelector = .init(samplePoint(x, y, scale, tx, ty));
-            edge_selectors.accumulate(&selector, shape);
-            out_pixels[row * w + x] = mapDistance(selector.distance(), px_range, invert_pixels);
+            const distance = if (overlap_support) edge_selectors.accumulateOverlapping(edge_selectors.PerpendicularDistanceSelector, selectors, shape, selector.p).distance() else b: { edge_selectors.accumulate(&selector, shape); break :b selector.distance(); };
+            out_pixels[row * w + x] = mapDistance(distance, px_range, invert_pixels);
         }
     }
 }
 
-fn generateMsdf(out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px_range: f64, tx: f64, ty: f64, invert_pixels: bool) void {
+fn generateMsdf(allocator: std.mem.Allocator, out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px_range: f64, tx: f64, ty: f64, invert_pixels: bool, overlap_support: bool) !void {
+    const selectors = try allocator.alloc(edge_selectors.MultiDistanceSelector, if (overlap_support) shape.contours.items.len else 0);
+    defer allocator.free(selectors);
     const channels = 3;
     for (0..h) |y| {
         const row = h - y - 1;
         for (0..w) |x| {
             var selector: edge_selectors.MultiDistanceSelector = .init(samplePoint(x, y, scale, tx, ty));
-            edge_selectors.accumulate(&selector, shape);
-            const md = selector.distance();
+            const md = if (overlap_support) edge_selectors.accumulateOverlapping(edge_selectors.MultiDistanceSelector, selectors, shape, selector.p).distance() else b: { edge_selectors.accumulate(&selector, shape); break :b selector.distance(); };
 
             const out = out_pixels[row * w * channels + x * channels ..][0..3];
             out[0] = mapDistance(md.r, px_range, invert_pixels);
@@ -438,14 +445,15 @@ fn generateMsdf(out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px_
     }
 }
 
-fn generateMtsdf(out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px_range: f64, tx: f64, ty: f64, invert_pixels: bool) void {
+fn generateMtsdf(allocator: std.mem.Allocator, out_pixels: []f64, w: u16, h: u16, scale: f64, shape: Shape, px_range: f64, tx: f64, ty: f64, invert_pixels: bool, overlap_support: bool) !void {
+    const selectors = try allocator.alloc(edge_selectors.MultiDistanceSelector, if (overlap_support) shape.contours.items.len else 0);
+    defer allocator.free(selectors);
     const channels = 4;
     for (0..h) |y| {
         const row = h - y - 1;
         for (0..w) |x| {
             var selector: edge_selectors.MultiDistanceSelector = .init(samplePoint(x, y, scale, tx, ty));
-            edge_selectors.accumulate(&selector, shape);
-            const mtd = selector.multiAndTrueDistance();
+            const mtd = if (overlap_support) edge_selectors.accumulateOverlapping(edge_selectors.MultiDistanceSelector, selectors, shape, selector.p).multiAndTrueDistance() else b: { edge_selectors.accumulate(&selector, shape); break :b selector.multiAndTrueDistance(); };
 
             const out = out_pixels[row * w * channels + x * channels ..][0..4];
             out[0] = mapDistance(mtd.r, px_range, invert_pixels);

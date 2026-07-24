@@ -2,7 +2,6 @@ const std = @import("std");
 
 const edge_color = @import("edge_color.zig");
 const EdgeColor = edge_color.EdgeColor;
-const Seed = edge_color.Seed;
 const EdgeSegment = @import("EdgeSegment.zig");
 const math = @import("math.zig");
 const Shape = @import("Shape.zig");
@@ -22,11 +21,13 @@ fn isCorner(a: Vec2, b: Vec2, cross_threshold: f64) bool {
     return math.dot(a, b) <= 0 or @abs(math.cross(a, b)) > cross_threshold;
 }
 
-/// Port of msdfgen's `edgeColoringSimple`.
+/// Simple randomized edge coloring. `seed_value` makes the result reproducible
+/// without coupling it to msdfgen's implementation-specific seed sequence.
 pub fn colorShape(allocator: std.mem.Allocator, shape: *Shape, angle_threshold: f64, seed_value: u64) !void {
     const cross_threshold = @sin(angle_threshold);
-    var seed: Seed = .init(seed_value);
-    var color: EdgeColor = seed.initColor();
+    var prng = std.Random.DefaultPrng.init(seed_value);
+    const random = prng.random();
+    var color = initialColor(random);
     var corners: std.ArrayList(u32) = .empty;
     defer corners.deinit(allocator);
 
@@ -35,7 +36,7 @@ pub fn colorShape(allocator: std.mem.Allocator, shape: *Shape, angle_threshold: 
 
         // Identify corners
         corners.clearRetainingCapacity();
-        var prev_dir = contour.edges.getLast().?.direction(1);
+        var prev_dir = contour.edges.items[contour.edges.items.len - 1].direction(1);
         for (contour.edges.items, 0..) |edge, i| {
             if (isCorner(math.normal(prev_dir, true), math.normal(edge.direction(0), true), cross_threshold))
                 try corners.append(allocator, @intCast(i));
@@ -45,16 +46,16 @@ pub fn colorShape(allocator: std.mem.Allocator, shape: *Shape, angle_threshold: 
         switch (corners.items.len) {
             // Smooth contour
             0 => {
-                seed.switchColor(&color);
+                switchColor(random, &color);
                 for (contour.edges.items) |*edge| edge.color = color;
             },
             // "Teardrop" case
             1 => {
                 var colors: [3]EdgeColor = undefined;
-                seed.switchColor(&color);
+                switchColor(random, &color);
                 colors[0] = color;
                 colors[1] = .white;
-                seed.switchColor(&color);
+                switchColor(random, &color);
                 colors[2] = color;
 
                 const corner = corners.items[0];
@@ -100,7 +101,7 @@ pub fn colorShape(allocator: std.mem.Allocator, shape: *Shape, angle_threshold: 
                 var spline: u32 = 0;
                 const start = corners.items[0];
                 const m = contour.edges.items.len;
-                seed.switchColor(&color);
+                switchColor(random, &color);
                 const initial_color = color;
                 for (0..m) |i| {
                     const index = (start + i) % m;
@@ -108,7 +109,8 @@ pub fn colorShape(allocator: std.mem.Allocator, shape: *Shape, angle_threshold: 
                         spline += 1;
                         // Banning the initial color on the last spline keeps the
                         // wrap-around seam from repeating a color.
-                        seed.switchColorBanned(
+                        switchColorBanned(
+                            random,
                             &color,
                             if (spline == corner_count - 1) initial_color else .black,
                         );
@@ -117,5 +119,27 @@ pub fn colorShape(allocator: std.mem.Allocator, shape: *Shape, angle_threshold: 
                 }
             },
         }
+    }
+}
+
+fn initialColor(random: std.Random) EdgeColor {
+    return ([3]EdgeColor{ .cyan, .magenta, .yellow })[random.uintLessThan(u2, 3)];
+}
+
+/// Rotates a two-channel color by one or two channels. The choice is made by
+/// Zig's default Xoshiro256 PRNG, which has better statistical properties than
+/// msdfgen's seed-bit extractor.
+fn switchColor(random: std.Random, color: *EdgeColor) void {
+    const shifted: u32 = @as(u32, @intFromEnum(color.*)) << (@as(u5, 1) + @intFromBool(random.boolean()));
+    color.* = @enumFromInt((shifted | shifted >> 3) & @intFromEnum(EdgeColor.white));
+}
+
+fn switchColorBanned(random: std.Random, color: *EdgeColor, banned: EdgeColor) void {
+    const combined: EdgeColor = @enumFromInt(@intFromEnum(color.*) & @intFromEnum(banned));
+    switch (combined) {
+        .red, .green, .blue => color.* = @enumFromInt(
+            @intFromEnum(combined) ^ @intFromEnum(EdgeColor.white),
+        ),
+        else => switchColor(random, color),
     }
 }

@@ -22,10 +22,14 @@ const artifact_t_epsilon = 0.01;
 const protection_radius_tolerance = 1.001;
 
 pub const Mode = enum { indiscriminate, edge_priority, edge_only };
+/// Matches msdfgen's `ErrorCorrectionConfig::DistanceCheckMode`.
+pub const DistanceCheckMode = enum { never, at_edge, always };
 pub const Options = struct {
     mode: Mode = .edge_priority,
-    /// Will be forcefully turned off if the scanline pass is enabled
-    check_distance: bool = true,
+    /// `at_edge` is msdfgen's default: first detect cheap discontinuities, then
+    /// protect all texels and use exact shape distances only for edge candidates.
+    /// This is forced to `never` when a scanline sign-correction pass is used.
+    distance_check_mode: DistanceCheckMode = .at_edge,
     min_deviation_ratio: f64 = 10.0 / 9.0,
     min_improve_ratio: f64 = 10.0 / 9.0,
 };
@@ -57,6 +61,7 @@ const DistanceEvaluationInfo = struct {
     /// so it has to be mapped into the same space as the texels it is compared
     /// against. See evaluateArtifact.
     invert: bool = false,
+    check_distance: bool = false,
 };
 
 options: Options = .{},
@@ -75,9 +80,9 @@ pub fn create(allocator: std.mem.Allocator, shape: *const Shape, w: u16, h: u16,
     };
     @memset(ret.stencil, .{});
 
-    if (disable_dist and options.check_distance) {
+    if (disable_dist and options.distance_check_mode != .never) {
         std.log.warn("Attempted to use distance-based error correction with a non-null scanline pass, disabling", .{});
-        ret.options.check_distance = false;
+        ret.options.distance_check_mode = .never;
     }
 
     return ret;
@@ -113,7 +118,22 @@ pub fn correct(
         .indiscriminate => {},
     }
 
-    self.findErrors(scale, px_range, vtx, sdf_px, sdf_w, sdf_h, channels);
+    // Keep the same two-pass policy as msdfgen. The fast pass is intentionally
+    // run before `protectAll`; the exact-distance pass then only evaluates the
+    // remaining edge candidates for the default `.at_edge` mode.
+    if (self.options.distance_check_mode == .never or
+        (self.options.distance_check_mode == .at_edge and self.options.mode != .edge_only))
+    {
+        self.dist_eval.check_distance = false;
+        self.findErrors(scale, px_range, vtx, sdf_px, sdf_w, sdf_h, channels);
+        if (self.options.distance_check_mode == .at_edge) {
+            for (self.stencil) |*mask| mask.protected = true;
+        }
+    }
+    if (self.options.distance_check_mode == .at_edge or self.options.distance_check_mode == .always) {
+        self.dist_eval.check_distance = true;
+        self.findErrors(scale, px_range, vtx, sdf_px, sdf_w, sdf_h, channels);
+    }
 
     for (0..sdf_w * sdf_h) |i| if (self.stencil[i].err) {
         const msdf = sdf_px[i * channels ..][0..3];
@@ -125,7 +145,7 @@ pub fn protectCorners(self: *ErrorCorrection, shape: *Shape, scale: f64, vtx: Ve
     for (shape.contours.items) |contour| {
         if (contour.edges.items.len == 0) continue;
 
-        var prev_edge = contour.edges.getLast().?;
+        var prev_edge = contour.edges.items[contour.edges.items.len - 1];
         for (contour.edges.items) |edge| {
             // Widened to i32 to match the C++: at commonColor 0 this relies on
             // 0 & -1 == 0, which a u8 would trap on instead.
@@ -333,7 +353,7 @@ fn psdfDistAt(shape: *const Shape, p: Vec2) f64 {
 
 fn evaluateArtifact(self: ErrorCorrection, flags: ClassifierFlags, t: f64) bool {
     if (flags.artifact) return true;
-    if (!self.options.check_distance or !flags.candidate) return false;
+    if (!self.dist_eval.check_distance or !flags.candidate) return false;
 
     const t_vec = math.v2(t) * self.dist_eval.dir;
 

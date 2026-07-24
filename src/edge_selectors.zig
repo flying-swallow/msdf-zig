@@ -22,6 +22,7 @@ const std = @import("std");
 
 const EdgeColor = @import("edge_color.zig").EdgeColor;
 const EdgeSegment = @import("EdgeSegment.zig");
+const Contour = @import("Contour.zig");
 const math = @import("math.zig");
 const Shape = @import("Shape.zig");
 const SignedDistance = @import("SignedDistance.zig");
@@ -51,6 +52,10 @@ pub const TrueDistanceSelector = struct {
 
     pub fn distance(self: TrueDistanceSelector) f64 {
         return self.min_distance.distance;
+    }
+
+    pub fn merge(self: *TrueDistanceSelector, other: TrueDistanceSelector) void {
+        if (other.min_distance.lessThan(self.min_distance)) self.min_distance = other.min_distance;
     }
 };
 
@@ -102,6 +107,16 @@ pub const PerpendicularDistanceSelectorBase = struct {
 
     pub fn trueDistance(self: PerpendicularDistanceSelectorBase) SignedDistance {
         return self.min_true_distance;
+    }
+
+    pub fn merge(self: *PerpendicularDistanceSelectorBase, other: PerpendicularDistanceSelectorBase) void {
+        if (other.min_true_distance.lessThan(self.min_true_distance)) {
+            self.min_true_distance = other.min_true_distance;
+            self.near_edge = other.near_edge;
+            self.near_edge_param = other.near_edge_param;
+        }
+        self.min_negative_perpendicular_distance = @max(self.min_negative_perpendicular_distance, other.min_negative_perpendicular_distance);
+        self.min_positive_perpendicular_distance = @min(self.min_positive_perpendicular_distance, other.min_positive_perpendicular_distance);
     }
 };
 
@@ -170,6 +185,10 @@ pub const PerpendicularDistanceSelector = struct {
     pub fn distance(self: PerpendicularDistanceSelector) f64 {
         return self.base.computeDistance(self.p);
     }
+
+    pub fn merge(self: *PerpendicularDistanceSelector, other: PerpendicularDistanceSelector) void {
+        self.base.merge(other.base);
+    }
 };
 
 /// Three independent perpendicular channels, routed by edge color. Backs `msdf`.
@@ -234,24 +253,83 @@ pub const MultiDistanceSelector = struct {
         const md = self.distance();
         return .{ .r = md.r, .g = md.g, .b = md.b, .a = self.trueDistance().distance };
     }
+
+    pub fn merge(self: *MultiDistanceSelector, other: MultiDistanceSelector) void {
+        self.r.merge(other.r);
+        self.g.merge(other.g);
+        self.b.merge(other.b);
+    }
 };
 
 /// Drives `selector` over every edge of `shape`, handing each one its cyclic
 /// prev/next neighbours. Mirrors msdfgen's ShapeDistanceFinder::distance walk.
 pub fn accumulate(selector: anytype, shape: Shape) void {
     for (shape.contours.items) |contour| {
-        const edges = contour.edges.items;
-        if (edges.len == 0) continue;
-
-        // Start one before the end so that the first edge visited (the last one
-        // in the contour) already has both neighbours correct; every edge is then
-        // visited exactly once.
-        var prev_edge: *const EdgeSegment = if (edges.len >= 2) &edges[edges.len - 2] else &edges[0];
-        var cur_edge: *const EdgeSegment = &edges[edges.len - 1];
-        for (edges) |*next_edge| {
-            selector.addEdge(prev_edge, cur_edge, next_edge);
-            prev_edge = cur_edge;
-            cur_edge = next_edge;
-        }
+        accumulateContour(selector, contour);
     }
+}
+
+pub fn accumulateContour(selector: anytype, contour: Contour) void {
+    const edges = contour.edges.items;
+    if (edges.len == 0) return;
+    var prev_edge: *const EdgeSegment = if (edges.len >= 2) &edges[edges.len - 2] else &edges[0];
+    var cur_edge: *const EdgeSegment = &edges[edges.len - 1];
+    for (edges) |*next_edge| {
+        selector.addEdge(prev_edge, cur_edge, next_edge);
+        prev_edge = cur_edge;
+        cur_edge = next_edge;
+    }
+}
+
+fn resolveDistance(distance: anytype) f64 {
+    return switch (@typeInfo(@TypeOf(distance))) {
+        .float => distance,
+        else => math.median(distance.r, distance.g, distance.b),
+    };
+}
+
+/// msdfgen's `OverlappingContourCombiner`, using caller-owned per-contour
+/// selector storage so rasterization does not allocate per texel.
+pub fn accumulateOverlapping(comptime Selector: type, selectors: []Selector, shape: Shape, p: Vec2) Selector {
+    var shape_selector = Selector.init(p);
+    var inner_selector = Selector.init(p);
+    var outer_selector = Selector.init(p);
+    for (shape.contours.items, selectors) |contour, *selector| {
+        selector.* = Selector.init(p);
+        accumulateContour(selector, contour);
+        const contour_distance = selector.distance();
+        shape_selector.merge(selector.*);
+        if (contour.winding() > 0 and resolveDistance(contour_distance) >= 0)
+            inner_selector.merge(selector.*);
+        if (contour.winding() < 0 and resolveDistance(contour_distance) <= 0)
+            outer_selector.merge(selector.*);
+    }
+    const shape_distance = shape_selector.distance();
+    const inner_distance = inner_selector.distance();
+    const outer_distance = outer_selector.distance();
+    var distance: Selector = undefined;
+    var winding: i32 = 0;
+    if (resolveDistance(inner_distance) >= 0 and @abs(resolveDistance(inner_distance)) <= @abs(resolveDistance(outer_distance))) {
+        distance = inner_selector;
+        winding = 1;
+        for (shape.contours.items, selectors) |contour, selector| if (contour.winding() > 0) {
+            const candidate = selector.distance();
+            if (@abs(resolveDistance(candidate)) < @abs(resolveDistance(outer_distance)) and resolveDistance(candidate) > resolveDistance(distance.distance()))
+                distance = selector;
+        };
+    } else if (resolveDistance(outer_distance) <= 0 and @abs(resolveDistance(outer_distance)) < @abs(resolveDistance(inner_distance))) {
+        distance = outer_selector;
+        winding = -1;
+        for (shape.contours.items, selectors) |contour, selector| if (contour.winding() < 0) {
+            const candidate = selector.distance();
+            if (@abs(resolveDistance(candidate)) < @abs(resolveDistance(inner_distance)) and resolveDistance(candidate) < resolveDistance(distance.distance()))
+                distance = selector;
+        };
+    } else return shape_selector;
+    for (shape.contours.items, selectors) |contour, selector| if (contour.winding() != winding) {
+        const candidate = selector.distance();
+        if (resolveDistance(candidate) * resolveDistance(distance.distance()) >= 0 and @abs(resolveDistance(candidate)) < @abs(resolveDistance(distance.distance())))
+            distance = selector;
+    };
+    return if (resolveDistance(distance.distance()) == resolveDistance(shape_distance)) shape_selector else distance;
 }

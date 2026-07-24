@@ -32,7 +32,7 @@ pub fn format(self: Shape, writer: *std.Io.Writer) std.Io.Writer.Error!void {
 
 pub fn validate(self: Shape) bool {
     for (self.contours.items) |contour| if (contour.edges.items.len > 0) {
-        var corner = contour.edges.getLast().?.point(1);
+        var corner = contour.edges.items[contour.edges.items.len - 1].point(1);
         for (contour.edges.items) |edge| {
             const p0 = edge.point(0);
             if (!std.meta.eql(p0, corner)) return false;
