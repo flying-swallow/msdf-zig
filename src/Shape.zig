@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const Contour = @import("Contour.zig");
+const convergent_curve_ordering = @import("convergent_curve_ordering.zig");
 const EdgeSegment = @import("EdgeSegment.zig");
 const math = @import("math.zig");
 const Scanline = @import("Scanline.zig");
@@ -31,7 +32,7 @@ pub fn format(self: Shape, writer: *std.Io.Writer) std.Io.Writer.Error!void {
 
 pub fn validate(self: Shape) bool {
     for (self.contours.items) |contour| if (contour.edges.items.len > 0) {
-        var corner = contour.edges.getLast().point(1);
+        var corner = contour.edges.items[contour.edges.items.len - 1].point(1);
         for (contour.edges.items) |edge| {
             const p0 = edge.point(0);
             if (!std.meta.eql(p0, corner)) return false;
@@ -45,11 +46,10 @@ pub fn validate(self: Shape) bool {
 pub fn normalize(self: *Shape, allocator: std.mem.Allocator) !void {
     for (self.contours.items) |*contour| {
         if (contour.edges.items.len == 1) {
-            var parts: [3]EdgeSegment = @splat(.{});
-            contour.edges.items[0].splitInThirds(&parts);
+            const parts = contour.edges.items[0].splitInThirds();
             contour.edges.clearRetainingCapacity();
             try contour.edges.appendSlice(allocator, &parts);
-        } else {
+        } else if (contour.edges.items.len > 0) {
             var prev_edge = &contour.edges.items[contour.edges.items.len - 1];
             for (contour.edges.items) |*edge| {
                 const prev_dir = math.normal(prev_edge.direction(1), true);
@@ -58,11 +58,10 @@ pub fn normalize(self: *Shape, allocator: std.mem.Allocator) !void {
                     const factor = deconverge_overshoot *
                         @sqrt(1 - (corner_dot_epsilon - 1) * (corner_dot_epsilon - 1)) / (corner_dot_epsilon - 1);
                     var axis = math.normal(cur_dir - prev_dir, true) * math.v2(factor);
-                    if (math.cross(prev_edge.directionChange(1), edge.direction(0)) +
-                        math.cross(edge.directionChange(0), prev_edge.direction(1)) < 0)
+                    if (convergent_curve_ordering.convergentCurveOrdering(prev_edge.*, edge.*) < 0)
                         axis *= math.v2(-1.0);
-                    prev_edge.deconverge(1, math.ortho(axis, true));
-                    edge.deconverge(0, math.ortho(axis, false));
+                    prev_edge.* = prev_edge.deconverge(1, math.ortho(axis, true));
+                    edge.* = edge.deconverge(0, math.ortho(axis, false));
                 }
                 prev_edge = edge;
             }
@@ -70,32 +69,29 @@ pub fn normalize(self: *Shape, allocator: std.mem.Allocator) !void {
     }
 }
 
-pub fn bound(self: Shape, l: *f64, b: *f64, r: *f64, t: *f64) void {
-    for (self.contours.items) |contour| contour.bound(l, b, r, t);
+pub fn bound(self: Shape, a: math.RectangleBound(f64)) math.RectangleBound(f64) {
+    var bounds = a;
+    for (self.contours.items) |contour| bounds = contour.bound(bounds);
+    return bounds;
 }
 
-pub fn boundMiters(self: Shape, l: *f64, b: *f64, r: *f64, t: *f64, border: f64, miter_limit: f64, polarity: i32) void {
-    for (self.contours.items) |contour| contour.boundMiters(l, b, r, t, border, miter_limit, polarity);
+pub fn boundMiters(self: Shape, a: math.RectangleBound(f64), border: f64, miter_limit: f64, polarity: i32) math.RectangleBound(f64) {
+    var bounds = a;
+    for (self.contours.items) |contour| bounds = contour.boundMiters(bounds, border, miter_limit, polarity);
+    return bounds;
 }
 
 pub fn getBounds(self: Shape, border: f64, miter_limit: f64, polarity: i32) Bounds {
-    const large_value = 1e240;
-    var bounds: Bounds = .{
-        .left = large_value,
-        .bottom = large_value,
-        .right = -large_value,
-        .top = -large_value,
-    };
-    self.bound(&bounds.left, &bounds.bottom, &bounds.right, &bounds.top);
+    var bounds = self.bound(.empty);
     if (border > 0) {
-        bounds.left -= border;
-        bounds.bottom -= border;
-        bounds.right += border;
-        bounds.top += border;
+        bounds.l -= border;
+        bounds.b -= border;
+        bounds.r += border;
+        bounds.t += border;
         if (miter_limit > 0)
-            self.boundMiters(&bounds.left, &bounds.bottom, &bounds.right, &bounds.top, border, miter_limit, polarity);
+            bounds = self.boundMiters(bounds, border, miter_limit, polarity);
     }
-    return bounds;
+    return .{ .left = bounds.l, .bottom = bounds.b, .right = bounds.r, .top = bounds.t };
 }
 
 pub fn scanline(self: Shape, line: *Scanline, y: f64, allocator: std.mem.Allocator) !void {
@@ -108,12 +104,6 @@ pub fn scanline(self: Shape, line: *Scanline, y: f64, allocator: std.mem.Allocat
         const len = edge.scanlineIntersections(&x, &dy, y);
         for (0..len) |i| try line.intersections.append(allocator, .{ .x = x[i], .dir = dy[i] });
     };
-}
-
-pub fn edgeCount(self: Shape) u32 {
-    var total: u32 = 0;
-    for (self.contours.items) |contour| total += contour.edges.items.len;
-    return total;
 }
 
 pub fn orientContours(self: *Shape, allocator: std.mem.Allocator) !void {
@@ -136,11 +126,25 @@ pub fn orientContours(self: *Shape, allocator: std.mem.Allocator) !void {
     try orientations.ensureTotalCapacity(allocator, contours_len);
     try orientations.appendNTimes(allocator, 0, contours_len);
     for (0..contours_len) |i| {
-        if (orientations.items[i] == 0 or self.contours.items[i].edges.items.len == 0) continue;
+        // Skip contours already resolved by an earlier scanline, and empty ones.
+        // Note the polarity: a zero orientation means "not yet determined", so
+        // that is exactly the case this loop exists to handle.
+        if (orientations.items[i] != 0 or self.contours.items[i].edges.items.len == 0) continue;
+
+        // Find a Y that actually crosses the contour. Both loops stop as soon as
+        // they find one -- without the guard the last edge would simply win, and
+        // the second pass (which samples mid-edge, for contours whose endpoints
+        // are all colinear in Y) would clobber the first.
         const y0 = self.contours.items[i].edges.items[0].point(0)[1];
         var y1 = y0;
-        for (self.contours.items[i].edges.items) |edge| y1 = edge.point(1)[1];
-        for (self.contours.items[i].edges.items) |edge| y1 = edge.point(ratio)[1];
+        for (self.contours.items[i].edges.items) |edge| {
+            if (y0 != y1) break;
+            y1 = edge.point(1)[1];
+        }
+        for (self.contours.items[i].edges.items) |edge| {
+            if (y0 != y1) break;
+            y1 = edge.point(ratio)[1];
+        }
         const y = math.mix(y0, y1, ratio);
         var x: [3]f64 = @splat(0.0);
         var dy: [3]i32 = @splat(0);

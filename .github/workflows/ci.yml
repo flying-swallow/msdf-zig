@@ -24,6 +24,12 @@ jobs:
         uses: actions/checkout@v3
       - name: Install Zig
         uses: mlugg/setup-zig@v2
+      # Compares generated SDFs against committed msdfgen reference fixtures.
+      # This is the only check that looks at pixels -- `zig build run` below just
+      # proves the example links and exits 0, which is how a pile of distance
+      # math once went wrong unnoticed.
+      - name: Test
+        run: zig build test -Doptimize=${{ matrix.opt }}
       - name: Build and run
         working-directory: ./example
         run: zig build run -Doptimize=${{ matrix.opt }}

@@ -24,5 +24,24 @@ inline for (.{ 'A', 'B', 'C' }) |codepoint| {
 
 A more in-depth example can be found in `example/generate.zig`.
 
+## Testing
+
+`zig build test` compares generated SDFs against reference bitmaps produced by
+msdfgen 1.13 itself, across both a TrueType (quadratic) and a CFF (cubic) face,
+all four SDF types, and every error-correction / geometry-preprocessing /
+scanline combination. The fixtures live in `src/test/fixtures` and are committed,
+so the suite needs no C++ toolchain. See `tools/oracle/` to regenerate them
+against a different msdfgen version.
+
 ## Disclaimer
 This library might provide an option for it later, but you currently need to preprocess your fonts manually to resolve overlapping contours (if the font has them).
+
+## Changes
+
+### Edge coloring is deterministic
+
+`GenerationOptions.coloring_rng_seed` is now `coloring_seed`. The seed initializes
+Zig's default Xoshiro256 PRNG for each shape, keeping generation reentrant and
+thread-safe while producing better-distributed color choices than msdfgen's
+custom seed extractor. The output intentionally does not match msdfgen exactly;
+regenerate any cached atlases after upgrading.
