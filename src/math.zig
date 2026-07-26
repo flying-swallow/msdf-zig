@@ -2,6 +2,14 @@ const std = @import("std");
 
 const Vec2 = @Vector(2, f64);
 
+pub const EquationParams = struct {
+    a: f64,
+    b: f64,
+    c: f64,
+    /// Keeping this as NaN implies a quadratic equation
+    d: f64 = std.math.nan(f64),
+};
+
 pub fn lengthSqr(vec: Vec2) f64 {
     return @mulAdd(f64, vec[0], vec[0], vec[1] * vec[1]);
 }
@@ -10,11 +18,8 @@ pub fn length(vec: Vec2) f64 {
     return @sqrt(lengthSqr(vec));
 }
 
-pub fn ortho(vec: Vec2, polarity: bool) Vec2 {
-    return if (polarity)
-        .{ -vec[1], vec[0] }
-    else
-        .{ vec[1], -vec[0] };
+pub fn ortho(vec: Vec2) Vec2 {
+    return .{ -vec[1], vec[0] };
 }
 
 fn boolToF64(b: bool) f64 {
@@ -23,19 +28,14 @@ fn boolToF64(b: bool) f64 {
 
 pub fn normal(vec: Vec2, disallow_zero: bool) Vec2 {
     const len = length(vec);
-    if (len != 0.0) return vec / v2(len);
-    return .{ 0.0, boolToF64(disallow_zero) };
+    if (len == 0.0) return .{ 0.0, boolToF64(disallow_zero) };
+    return vec / v2(len);
 }
 
-pub fn orthonormal(vec: Vec2, polarity: bool, disallow_zero: bool) Vec2 {
+pub fn orthonormal(vec: Vec2, disallow_zero: bool) Vec2 {
     const len = length(vec);
-    if (len != 0.0)
-        return ortho(vec, polarity) / v2(len);
-
-    return if (polarity)
-        .{ 0.0, boolToF64(disallow_zero) }
-    else
-        .{ 0.0, -boolToF64(disallow_zero) };
+    if (len == 0.0) return .{ 0.0, boolToF64(disallow_zero) };
+    return ortho(vec) / v2(len);
 }
 
 pub fn dot(a: Vec2, b: Vec2) f64 {
@@ -74,7 +74,7 @@ pub fn boolSign(b: bool) i2 {
 }
 
 pub fn nonZeroSign(n: anytype) @TypeOf(n) {
-    const sign = boolSign(n > 0);
+    const sign = boolSign(n >= 0);
     switch (@typeInfo(@TypeOf(n))) {
         .float, .comptime_float => return @floatFromInt(sign),
         .int, .comptime_int => return sign,
@@ -84,4 +84,72 @@ pub fn nonZeroSign(n: anytype) @TypeOf(n) {
 
 pub fn v2(scalar: anytype) Vec2 {
     return @splat(scalar);
+}
+
+/// This populates the input `buf` buffer and returns a slice from it,
+/// so you should be mindful of its lifetime.
+pub fn solveEquation(buf: []f64, params: *const EquationParams) []f64 {
+    const quadratic_specified = std.math.isNan(params.d);
+    if (quadratic_specified or params.a == 0.0 or @abs(params.b / params.a) > 1e6) {
+        const a, const b, const c = if (quadratic_specified)
+            .{ params.a, params.b, params.c }
+        else
+            .{ params.b, params.c, params.d };
+
+        if (a == 0 or @abs(b) > 1e12 * @abs(a)) {
+            if (b == 0) return &.{};
+            buf[0] = -c / b;
+            return buf[0..1];
+        }
+
+        const discriminant = b * b - 4.0 * a * c;
+        if (discriminant > 0) {
+            const discriminant_sqrt = @sqrt(discriminant);
+            buf[0] = (-b + discriminant_sqrt) / (2 * a);
+            buf[1] = (-b - discriminant_sqrt) / (2 * a);
+            return buf[0..2];
+        }
+
+        if (discriminant == 0) {
+            buf[0] = -b / (2 * a);
+            return buf[0..1];
+        }
+
+        return &.{};
+    }
+
+    const a = params.b / params.a;
+    const b = params.c / params.a;
+    const c = params.d / params.a;
+    const a_sqr = a * a;
+    const q = (a_sqr - 3.0 * b) / 9.0;
+    const r = (a * (2.0 * a_sqr - 9.0 * b) + 27.0 * c) / 54.0;
+    const r_sqr = r * r;
+    const q_cube = q * q * q;
+    const a_third = a / 3.0;
+    if (r_sqr < q_cube) {
+        const t = std.math.acos(std.math.clamp(r / @sqrt(q_cube), -1.0, 1.0));
+        const sq = -2 * @sqrt(q);
+        buf[0] = sq * @cos(t / 3.0) - a_third;
+        buf[1] = sq * @cos((t + std.math.tau) / 3.0) - a_third;
+        buf[2] = sq * @cos((t + 2 * std.math.tau) / 3.0) - a_third;
+        return buf[0..3];
+    }
+
+    const inv: f64 = if (r < 0.0) 1.0 else -1.0;
+    const u = inv * std.math.pow(f64, @abs(r) + @sqrt(r_sqr - q_cube), 1.0 / 3.0);
+    if (u == 0.0) {
+        buf[0] = -a_third;
+        buf[1] = -a_third;
+        return buf[0..2];
+    }
+
+    const v = q / u;
+    buf[0] = (u + v) - a_third;
+    if (u == v or @abs(u - v) < 1e-12 * @abs(u + v)) {
+        buf[1] = -0.5 * (u + v) - a_third;
+        return buf[0..2];
+    }
+
+    return buf[0..1];
 }
