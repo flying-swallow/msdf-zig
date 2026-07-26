@@ -4,15 +4,12 @@ const ft = @import("mach-freetype");
 const pack = @import("turbopack");
 
 const coloring = @import("coloring.zig");
-const Contour = @import("Contour.zig");
-const edge_color = @import("edge_color.zig");
-const EdgeColor = edge_color.EdgeColor;
+const EdgeColor = coloring.EdgeColor;
 const EdgeSegment = @import("EdgeSegment.zig");
 const ErrorCorrection = @import("ErrorCorrection.zig");
 const math = @import("math.zig");
 const Scanline = @import("Scanline.zig");
 const Shape = @import("Shape.zig");
-const SignedDistance = @import("SignedDistance.zig");
 
 const Vec2 = @Vector(2, f64);
 const f64_nan = std.math.nan(f64);
@@ -27,7 +24,7 @@ pub const FontMetrics = struct {
     underline_thickness: f64,
 };
 
-pub const GlyphData = struct {
+pub const GlyphMetrics = struct {
     advance: f64,
     bearing_x: f64,
     bearing_y: f64,
@@ -42,38 +39,31 @@ pub const KerningPair = struct {
     y: f64,
 };
 
-pub const AtlasGlyphData = struct {
-    glyph_data: GlyphData,
+pub const GeneratedGlyph = struct {
+    metrics: GlyphMetrics,
+    pixels: []const u8,
+
+    pub fn deinit(self: GeneratedGlyph, allocator: std.mem.Allocator) void {
+        allocator.free(self.pixels);
+    }
+};
+
+pub const GeneratedAtlasGlyph = struct {
+    glyph_data: GlyphMetrics,
     codepoint: u21,
     /// This is the glyph's unscaled, unnormalized
     /// bounding box on the atlas, with padding included.
     tex_bounds: pack.Rect,
 };
 
-pub const Msdf10Pixel = packed struct(u32) {
-    r: u10 = 0,
-    g: u10 = 0,
-    b: u10 = 0,
-    a: u2 = std.math.maxInt(u2),
-};
-
-pub const SingleGlyphData = struct {
-    glyph_data: GlyphData,
-    pixels: []const u8,
-
-    pub fn deinit(self: SingleGlyphData, allocator: std.mem.Allocator) void {
-        allocator.free(self.pixels);
-    }
-};
-
-pub const AtlasData = struct {
-    glyphs: []const AtlasGlyphData,
+pub const GeneratedAtlas = struct {
+    glyphs: []const GeneratedAtlasGlyph,
     kernings: []const KerningPair,
     /// In case of `msdf10` you should reinterpret this as a `Msdf10Pixel` slice,
     /// like with 10-bit ABGR GPU formats (assuming a little endian host).
     pixels: []const u8,
 
-    pub fn deinit(self: AtlasData, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: GeneratedAtlas, allocator: std.mem.Allocator) void {
         allocator.free(self.glyphs);
         allocator.free(self.kernings);
         allocator.free(self.pixels);
@@ -101,12 +91,31 @@ pub const SdfType = enum {
             .mtsdf => 4,
         };
     }
+
+    pub fn requiresColoring(self: SdfType) bool {
+        return switch (self) {
+            .msdf, .msdf10, .mtsdf => true,
+            else => false,
+        };
+    }
 };
 
-pub const OrientationType = enum {
+pub const ColoringMethod = enum {
+    simple,
+    /// Only for use with ink trap fonts, as the coloring remains correct
+    /// after removing the edges required for trapping ink.
+    ink_trap,
+    /// Performs the coloring based on edge distances.
+    /// Somewhat slower than other methods, but it produces a better result most of the time.
+    distance,
+};
+
+pub const Winding = enum {
+    /// Attempts to figure out winding on its own, by checking
+    /// the polarity of an OOB point's distance.
     guess,
-    keep,
-    reverse,
+    positive,
+    negative,
 };
 
 pub const VarFontArgument = struct {
@@ -114,24 +123,42 @@ pub const VarFontArgument = struct {
     value: f64,
 };
 
-pub const GenerationOptions = struct {
+pub const Options = struct {
     sdf_type: SdfType,
     px_size: u16,
     px_range: u16,
+    /// Has no effect if `sdf_type.requiresColoring()` is false.
     coloring_rng_seed: u64 = 0,
+    /// The method with which to perform the MSDF 3-coloring.
+    /// While the implementations are based on msdfgen, they're (intentionally)
+    /// not equivalent, but should resolve corners similarly well.
+    ///
+    /// Has no effect if `sdf_type.requiresColoring()` is false.
+    coloring_method: ColoringMethod = .distance,
+    /// The angle which is considered to be a corner, in radians.
     corner_angle_threshold: f64 = 3.0,
-    orientation: OrientationType = .guess,
+    winding: Winding = .guess,
+    /// Validates that the given (or generated) shapes' contours form a
+    /// closed loop, with each edge connecting to each other properly.
     validate_shape: bool = false,
     normalize_shape: bool = false,
     orient_contours: bool = false,
-    /// Requires `orient_contours` to be disabled
+    /// Requires `orient_contours` to be disabled.
     scanline_fill_rule: ?Scanline.FillRule = null,
-    /// Only MSDFs (both their normal and their 10-bit versions) and MTSDFs can be error corrected
+    /// Only MSDFs (both their normal and their 10-bit versions) and MTSDFs can be error corrected.
     error_correction_opts: ?ErrorCorrection.Options = .{},
+    /// The list of arguments to use if the given font has multiple masters.
     var_font_args: []const VarFontArgument = &.{},
     /// Whether to use async tasks over concurrent ones during atlas generation.
     /// Currently has no effect outside of atlas generation.
     disable_concurrency: bool = false,
+};
+
+pub const Msdf10Pixel = packed struct(u32) {
+    r: u10 = 0,
+    g: u10 = 0,
+    b: u10 = 0,
+    a: u2 = std.math.maxInt(u2),
 };
 
 const FreetypeContext = struct {
@@ -139,13 +166,7 @@ const FreetypeContext = struct {
     scale: f64,
     shape: *Shape,
     pos: Vec2 = @splat(0.0),
-    contour: ?*Contour = null,
-};
-
-const PsdfData = struct {
-    min_dist: SignedDistance = .{},
-    near_edge: ?*const EdgeSegment = null,
-    near_param: f64 = 0,
+    contour: ?*Shape.Contour = null,
 };
 
 library: ft.Library,
@@ -201,7 +222,7 @@ fn handleVarFont(
         for (var_args) |args|
             for (var_font.axis[0..var_font.num_axis], 0..) |axis, i|
                 if (std.mem.eql(u8, std.mem.span(axis.name), args.name)) {
-                    coords[i] = @intFromFloat(std.math.maxInt(u16) * args.value);
+                    coords[i] = @trunc(std.math.maxInt(u16) * args.value);
                 };
         try face.setVarDesignCoords(coords);
     };
@@ -213,12 +234,12 @@ pub fn generateSingle(
     self: *Generator,
     allocator: std.mem.Allocator,
     codepoint: u21,
-    gen_opts: *const GenerationOptions,
-) !SingleGlyphData {
+    opts: *const Options,
+) !GeneratedGlyph {
     const face = try self.library.createFaceMemory(self.font_memory, 0);
     defer face.deinit();
 
-    try self.handleVarFont(face, allocator, gen_opts.var_font_args, face.faceFlags());
+    try self.handleVarFont(face, allocator, opts.var_font_args, face.faceFlags());
 
     const scale = 1.0 / f64i(face.unitsPerEM());
     const glyph_index = face.getCharIndex(codepoint) orelse return error.InvalidCodepoint;
@@ -250,7 +271,7 @@ pub fn generateSingle(
     const metrics = face.glyph().metrics();
     if (shape.contours.items.len == 0)
         return .{
-            .glyph_data = .{
+            .metrics = .{
                 .advance = scale * f64i(face.glyph().advance().x),
                 .bearing_x = scale * f64i(metrics.horiBearingX),
                 .bearing_y = scale * f64i(metrics.horiBearingY),
@@ -267,29 +288,35 @@ pub fn generateSingle(
             _ = shape.contours.swapRemove(@intCast(i));
         };
 
-    if (gen_opts.validate_shape and !shape.validate()) return error.InvalidShape;
-    if (gen_opts.orient_contours) try shape.orientContours(allocator);
-    if (gen_opts.normalize_shape) try shape.normalize(allocator);
+    if (opts.validate_shape and !shape.validate()) return error.InvalidShape;
+    if (opts.orient_contours) try shape.orientContours(allocator);
+    if (opts.normalize_shape) try shape.normalize(allocator);
 
-    const px_size = f64i(gen_opts.px_size);
-    const px_range = f64i(gen_opts.px_range) / px_size;
+    const px_size = f64i(opts.px_size);
+    const px_range = f64i(opts.px_range) / px_size;
 
-    var bounds = shape.getBounds(0, 0, 0);
+    var bounds = shape.calcBounds();
     if (bounds.left >= bounds.right or bounds.bottom >= bounds.top)
-        bounds = .{ .left = 0, .bottom = 0, .right = 1, .top = 1 };
+        bounds = .whole_frame;
 
     const bound_w = bounds.right - bounds.left;
     const bound_h = bounds.top - bounds.bottom;
     const w: u16 = @trunc((bound_w + px_range) * px_size);
     const h: u16 = @trunc((bound_h + px_range) * px_size);
 
-    const oob_point: Vec2 = if (gen_opts.orientation == .guess)
-        .{ bounds.left - bound_w - 1, bounds.bottom - bound_h - 1 }
-    else
-        undefined;
+    if (opts.winding == .negative or
+        opts.winding == .guess and findDistanceAt(
+            .sdf,
+            shape,
+            .{
+                bounds.left - px_range - bound_w - 1.0,
+                bounds.bottom - px_range - bound_h - 1.0,
+            },
+            px_range,
+        ) > 0) for (shape.contours.items) |*contour| contour.reverse();
 
     return .{
-        .glyph_data = .{
+        .metrics = .{
             .advance = scale * f64i(face.glyph().advance().x),
             .bearing_x = scale * f64i(metrics.horiBearingX),
             .bearing_y = scale * f64i(metrics.horiBearingY),
@@ -298,7 +325,7 @@ pub fn generateSingle(
         },
         .pixels = try getSdfPixels(
             allocator,
-            gen_opts,
+            opts,
             w,
             h,
             &shape,
@@ -306,7 +333,6 @@ pub fn generateSingle(
                 bounds.left - px_range / 2.0,
                 bounds.bottom - px_range / 2.0,
             },
-            oob_point,
         ),
     };
 }
@@ -321,9 +347,9 @@ pub fn generateAtlas(
     atlas_h: u16,
     glyph_padding: u8,
     use_kerning: bool,
-    gen_opts: *const GenerationOptions,
-) !AtlasData {
-    const glyphs = try allocator.alloc(AtlasGlyphData, codepoints.len);
+    opts: *const Options,
+) !GeneratedAtlas {
+    const glyphs = try allocator.alloc(GeneratedAtlasGlyph, codepoints.len);
     errdefer allocator.free(glyphs);
 
     var kernings: std.ArrayList(KerningPair) = .empty;
@@ -382,7 +408,7 @@ pub fn generateAtlas(
         const args = .{
             self,
             allocator,
-            gen_opts,
+            opts,
             codepoint,
             glyph,
             id_rect,
@@ -390,7 +416,7 @@ pub fn generateAtlas(
             glyph_padding,
         };
 
-        if (gen_opts.disable_concurrency)
+        if (opts.disable_concurrency)
             process_group.async(io, processAtlasCodepoint, args)
         else
             try process_group.concurrent(io, processAtlasCodepoint, args);
@@ -410,10 +436,10 @@ pub fn generateAtlas(
         }.lessThan },
     );
 
-    const mod_channels = if (gen_opts.sdf_type == .msdf10)
+    const mod_channels = if (opts.sdf_type == .msdf10)
         4
     else
-        gen_opts.sdf_type.numChannels();
+        opts.sdf_type.numChannels();
     const pixels = try allocator.alloc(u8, @as(usize, atlas_w) * @as(usize, atlas_h) * @as(usize, mod_channels));
     errdefer allocator.free(pixels);
     @memset(pixels, 0);
@@ -453,16 +479,16 @@ pub fn generateAtlas(
 fn processAtlasCodepoint(
     self: *Generator,
     allocator: std.mem.Allocator,
-    gen_opts: *const GenerationOptions,
+    opts: *const Options,
     codepoint: u21,
-    glyph: *AtlasGlyphData,
+    glyph: *GeneratedAtlasGlyph,
     id_rect: *pack.IdRect,
     rect_px: *[]const u8,
     padding: u8,
 ) std.Io.Cancelable!void {
     self.processAtlasCodepointInner(
         allocator,
-        gen_opts,
+        opts,
         glyph,
         id_rect,
         rect_px,
@@ -477,22 +503,22 @@ fn processAtlasCodepoint(
 fn processAtlasCodepointInner(
     self: *Generator,
     allocator: std.mem.Allocator,
-    gen_opts: *const GenerationOptions,
-    glyph: *AtlasGlyphData,
+    opts: *const Options,
+    glyph: *GeneratedAtlasGlyph,
     id_rect: *pack.IdRect,
     rect_px: *[]const u8,
     padding: u8,
     codepoint: u21,
 ) !void {
-    const single_glyph = try self.generateSingle(allocator, codepoint, gen_opts);
-    const glyph_w = single_glyph.glyph_data.width;
-    const glyph_h = single_glyph.glyph_data.height;
+    const single_glyph = try self.generateSingle(allocator, codepoint, opts);
+    const glyph_w = single_glyph.metrics.width;
+    const glyph_h = single_glyph.metrics.height;
     if (glyph_w == 0 or glyph_h == 0) {
         glyph.* = .{
             .glyph_data = .{
-                .advance = single_glyph.glyph_data.advance,
-                .bearing_x = single_glyph.glyph_data.bearing_x,
-                .bearing_y = single_glyph.glyph_data.bearing_y,
+                .advance = single_glyph.metrics.advance,
+                .bearing_x = single_glyph.metrics.bearing_x,
+                .bearing_y = single_glyph.metrics.bearing_y,
                 .width = 0.0,
                 .height = 0.0,
             },
@@ -510,9 +536,9 @@ fn processAtlasCodepointInner(
     };
     glyph.* = .{
         .glyph_data = .{
-            .advance = single_glyph.glyph_data.advance,
-            .bearing_x = single_glyph.glyph_data.bearing_x,
-            .bearing_y = single_glyph.glyph_data.bearing_y,
+            .advance = single_glyph.metrics.advance,
+            .bearing_x = single_glyph.metrics.bearing_x,
+            .bearing_y = single_glyph.metrics.bearing_y,
             .width = @intCast(id_rect.rect.w),
             .height = @intCast(id_rect.rect.h),
         },
@@ -528,12 +554,11 @@ fn processAtlasCodepointInner(
 
 fn getSdfPixels(
     allocator: std.mem.Allocator,
-    opts: *const GenerationOptions,
+    opts: *const Options,
     w: u16,
     h: u16,
     shape: *Shape,
     tfm: Vec2,
-    oob_point: Vec2,
 ) ![]const u8 {
     const px_size = f64i(opts.px_size);
     const px_range = f64i(opts.px_range) / px_size;
@@ -554,13 +579,14 @@ fn getSdfPixels(
     );
     defer allocator.free(dist_pixels);
 
-    const invert_pixels = opts.orientation == .reverse or
-        (opts.orientation == .guess and findDistanceAt(.sdf, shape.*, oob_point, px_range) > 0);
     switch (opts.sdf_type) {
         inline else => |ty| {
-            if (ty == .msdf or ty == .msdf10 or ty == .mtsdf)
-                try coloring.colorShape(allocator, opts.coloring_rng_seed, shape, opts.corner_angle_threshold);
-            generate(ty, dist_pixels, w, h, px_size, shape.*, px_range, tfm, invert_pixels);
+            if (ty.requiresColoring()) switch (opts.coloring_method) {
+                .simple => try coloring.colorSimple(allocator, opts.coloring_rng_seed, shape, opts.corner_angle_threshold),
+                .ink_trap => try coloring.colorInkTrap(allocator, opts.coloring_rng_seed, shape, opts.corner_angle_threshold),
+                .distance => try coloring.colorDistance(allocator, opts.coloring_rng_seed, shape, opts.corner_angle_threshold),
+            };
+            generate(ty, dist_pixels, w, h, px_size, shape.*, px_range, tfm);
         },
     }
 
@@ -714,20 +740,27 @@ pub fn findDistanceAt(
     .sdf, .psdf => f64,
     inline .msdf, .msdf10, .mtsdf => |ty| [ty.numChannels()]f64,
 } {
-    var sdf_target: SignedDistance = .{};
-    var psdf_target: [if (sdf_type == .psdf) 1 else 3]PsdfData = @splat(.{});
+    const PsdfData = struct {
+        dist: EdgeSegment.SignedDist = .init,
+        edge: ?*const EdgeSegment = null,
+        point_pos: EdgeSegment.PointPosition = .within_segment,
+    };
+
+    var true_ch: EdgeSegment.SignedDist = .init;
+    var perp_ch: [if (sdf_type == .psdf) 1 else 3]PsdfData = @splat(.{});
     for (shape.contours.items) |contour| for (contour.edges.items) |*edge| {
-        const dist, const param = edge.signedDistance(p);
+        const dist, const point_pos = edge.signedDistance(p);
 
         switch (sdf_type) {
             .sdf, .mtsdf => {
-                if (dist.lessThan(sdf_target)) sdf_target = dist;
+                if (dist.lessThan(true_ch))
+                    true_ch = dist;
             },
             .psdf => {
-                if (dist.lessThan(psdf_target[0].min_dist)) psdf_target[0] = .{
-                    .min_dist = dist,
-                    .near_edge = edge,
-                    .near_param = param,
+                if (dist.lessThan(perp_ch[0].dist)) perp_ch[0] = .{
+                    .dist = dist,
+                    .edge = edge,
+                    .point_pos = point_pos,
                 };
             },
             else => {},
@@ -735,37 +768,37 @@ pub fn findDistanceAt(
 
         if (sdf_type != .sdf and sdf_type != .psdf)
             for ([_]struct { channel: EdgeColor, target: *PsdfData }{
-                .{ .channel = .red, .target = &psdf_target[0] },
-                .{ .channel = .green, .target = &psdf_target[1] },
-                .{ .channel = .blue, .target = &psdf_target[2] },
+                .{ .channel = .red, .target = &perp_ch[0] },
+                .{ .channel = .green, .target = &perp_ch[1] },
+                .{ .channel = .blue, .target = &perp_ch[2] },
             }) |params|
-                if (edge.color.hasChannel(params.channel) and dist.lessThan(params.target.min_dist)) {
+                if (edge.color.hasChannel(params.channel) and dist.lessThan(params.target.dist)) {
                     params.target.* = .{
-                        .min_dist = dist,
-                        .near_edge = edge,
-                        .near_param = param,
+                        .dist = dist,
+                        .edge = edge,
+                        .point_pos = point_pos,
                     };
                 };
     };
 
-    if (sdf_type != .sdf) for (&psdf_target) |*psdf| {
-        if (psdf.near_edge) |edge|
-            edge.distanceToPerpendicularDistance(&psdf.min_dist, p, psdf.near_param);
+    if (sdf_type != .sdf) for (&perp_ch) |*psdf| {
+        if (psdf.edge) |edge|
+            edge.perpDistConvert(&psdf.dist, p, psdf.point_pos);
     };
 
     return switch (sdf_type) {
-        .sdf => pxRangeNorm(sdf_target.distance, px_range),
-        .psdf => pxRangeNorm(psdf_target[0].min_dist.distance, px_range),
+        .sdf => pxRangeNorm(true_ch.distance, px_range),
+        .psdf => pxRangeNorm(perp_ch[0].dist.distance, px_range),
         .msdf, .msdf10 => .{
-            pxRangeNorm(psdf_target[0].min_dist.distance, px_range),
-            pxRangeNorm(psdf_target[1].min_dist.distance, px_range),
-            pxRangeNorm(psdf_target[2].min_dist.distance, px_range),
+            pxRangeNorm(perp_ch[0].dist.distance, px_range),
+            pxRangeNorm(perp_ch[1].dist.distance, px_range),
+            pxRangeNorm(perp_ch[2].dist.distance, px_range),
         },
         .mtsdf => .{
-            pxRangeNorm(psdf_target[0].min_dist.distance, px_range),
-            pxRangeNorm(psdf_target[1].min_dist.distance, px_range),
-            pxRangeNorm(psdf_target[2].min_dist.distance, px_range),
-            pxRangeNorm(sdf_target.distance, px_range),
+            pxRangeNorm(perp_ch[0].dist.distance, px_range),
+            pxRangeNorm(perp_ch[1].dist.distance, px_range),
+            pxRangeNorm(perp_ch[2].dist.distance, px_range),
+            pxRangeNorm(true_ch.distance, px_range),
         },
     };
 }
@@ -779,7 +812,6 @@ fn generate(
     shape: Shape,
     px_range: f64,
     tfm: Vec2,
-    invert_pixels: bool,
 ) void {
     for (0..h) |y| {
         const row = h - y - 1;
@@ -792,15 +824,14 @@ fn generate(
             switch (sdf_type) {
                 .sdf, .psdf => {
                     const dist = findDistanceAt(sdf_type, shape, p, px_range);
-                    out_pixels[row * w + x] = if (invert_pixels) 1.0 - dist else dist;
+                    out_pixels[row * w + x] = dist;
                 },
                 .msdf, .msdf10, .mtsdf => {
                     const channels = sdf_type.numChannels();
                     for (
                         out_pixels[row * w * channels + x * channels ..][0..channels],
                         findDistanceAt(sdf_type, shape, p, px_range),
-                    ) |*v, dist|
-                        v.* = if (invert_pixels) 1.0 - dist else dist;
+                    ) |*v, dist| v.* = dist;
                 },
             }
         }
@@ -830,7 +861,7 @@ fn ftLineTo(to: [*c]const ft.Vector, ud: ?*anyopaque) callconv(.c) i32 {
     if (!std.meta.eql(endpoint, context.pos)) {
         context.contour.?.edges.append(
             context.allocator,
-            .create(context.pos, endpoint, null, null, .white),
+            .create(context.pos, endpoint, null, null, .all),
         ) catch return ft.c.FT_Err_Out_Of_Memory;
         context.pos = endpoint;
     }
@@ -846,7 +877,7 @@ fn ftConicTo(control: [*c]const ft.Vector, to: [*c]const ft.Vector, ud: ?*anyopa
             scaledFtVec(control, context.scale),
             endpoint,
             null,
-            .white,
+            .all,
         )) catch return ft.c.FT_Err_Out_Of_Memory;
         context.pos = endpoint;
     }
@@ -866,7 +897,7 @@ fn ftCubicTo(
     if (!std.meta.eql(endpoint, context.pos) or math.cross(scaled_c1 - endpoint, scaled_c2 - endpoint) != 0.0) {
         context.contour.?.edges.append(
             context.allocator,
-            .create(context.pos, scaled_c1, scaled_c2, endpoint, .white),
+            .create(context.pos, scaled_c1, scaled_c2, endpoint, .all),
         ) catch return ft.c.FT_Err_Out_Of_Memory;
         context.pos = endpoint;
     }

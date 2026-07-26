@@ -45,35 +45,42 @@ pub fn main(init: std.process.Init) !void {
         metrics.line_height,
     });
 
-    var seed: u64 = undefined;
-    init.io.random(std.mem.asBytes(&seed));
+    const sdf_type: Generator.SdfType = .mtsdf;
 
-    const gen_opts: Generator.GenerationOptions = .{
-        .sdf_type = .mtsdf,
+    var seed: u64 = undefined;
+    if (sdf_type.requiresColoring())
+        init.io.random(std.mem.asBytes(&seed));
+
+    const opts: Generator.Options = .{
+        .sdf_type = sdf_type,
         .px_size = 64,
         .px_range = 8,
         .coloring_rng_seed = seed,
         .validate_shape = true,
         .normalize_shape = true,
+        .orient_contours = true,
     };
 
     for ([_]u21{ 'A', 'B', 'C' }) |codepoint| {
         const time: std.Io.Timestamp = .now(init.io, .real);
-        const data = try gen.generateSingle(init.gpa, codepoint, &gen_opts);
-        defer data.deinit(init.gpa);
-        std.log.info("SDF for codepoint {u} generated in: {}us", .{
+        const glyph = try gen.generateSingle(init.gpa, codepoint, &opts);
+        defer glyph.deinit(init.gpa);
+
+        const glyph_ns = time.durationTo(.now(init.io, .real)).nanoseconds;
+        std.log.info("SDF for codepoint `{u}` generated in {}us ({}ms)", .{
             codepoint,
-            @divFloor(time.durationTo(.now(init.io, .real)).nanoseconds, std.time.ns_per_us),
+            @divFloor(glyph_ns, std.time.ns_per_us),
+            @divFloor(glyph_ns, std.time.ns_per_ms),
         });
 
         var image: stbi.Image = try .createEmpty(
-            data.glyph_data.width,
-            data.glyph_data.height,
-            gen_opts.sdf_type.numChannels(),
+            glyph.metrics.width,
+            glyph.metrics.height,
+            opts.sdf_type.numChannels(),
             .{},
         );
         defer image.deinit();
-        @memcpy(image.data, data.pixels);
+        @memcpy(image.data, glyph.pixels);
 
         var path_buf: [64]u8 = undefined;
         const path = try std.fmt.bufPrintZ(&path_buf, "{u}_sdf.png", .{codepoint});
@@ -83,7 +90,7 @@ pub fn main(init: std.process.Init) !void {
     const atlas_w = 512;
     const atlas_h = 512;
     const time: std.Io.Timestamp = .now(init.io, .real);
-    const data = try gen.generateAtlas(
+    const atlas = try gen.generateAtlas(
         init.gpa,
         init.io,
         comptime printableAscii(),
@@ -91,21 +98,25 @@ pub fn main(init: std.process.Init) !void {
         atlas_h,
         2,
         true,
-        &gen_opts,
+        &opts,
     );
-    defer data.deinit(init.gpa);
-    std.log.info("SDF for atlas generated in: {}us", .{
-        @divFloor(time.durationTo(.now(init.io, .real)).nanoseconds, std.time.ns_per_us),
+    defer atlas.deinit(init.gpa);
+
+    const atlas_ns = time.durationTo(.now(init.io, .real)).nanoseconds;
+    std.log.info("SDFs for atlas ({} glyphs) generated in {}us ({}ms)", .{
+        atlas.glyphs.len,
+        @divFloor(atlas_ns, std.time.ns_per_us),
+        @divFloor(atlas_ns, std.time.ns_per_ms),
     });
 
     var image: stbi.Image = try .createEmpty(
         atlas_w,
         atlas_h,
-        gen_opts.sdf_type.numChannels(),
+        opts.sdf_type.numChannels(),
         .{},
     );
     defer image.deinit();
-    @memcpy(image.data, data.pixels);
+    @memcpy(image.data, atlas.pixels);
 
     try image.writeToFile("atlas_sdf.png", .png);
 }

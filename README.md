@@ -1,5 +1,5 @@
 # msdf-zig
-A Zig implementation of [Viktor Chlumský's signed distance field generator](https://github.com/Chlumsky/msdfgen).
+A Zig implementation of [Viktor Chlumský's multi-channel signed distance field generator](https://github.com/Chlumsky/msdfgen).
 
 ## Usage
 ```zig
@@ -12,11 +12,14 @@ defer gen.destroy();
 var seed: u64 = undefined;
 io.random(std.mem.asBytes(&seed));
 
-const gen_opts: Generator.GenerationOptions = .{
+const gen_opts: Generator.Options = .{
     .sdf_type = .mtsdf,
     .px_size = 64,
     .px_range = 8,
     .coloring_rng_seed = seed,
+    .validate_shape = true,
+    .normalize_shape = true,
+    .orient_contours = true,
 };
 
 for ([_]u21{ 'A', 'B', 'C' }) |codepoint| {
@@ -30,7 +33,7 @@ for ([_]u21{ 'A', 'B', 'C' }) |codepoint| {
         .{},
     );
     defer image.deinit();
-    @memcpy(image.data, data.pixels.normal);
+    @memcpy(image.data, data.pixels);
 
     var path_buf: [64]u8 = undefined;
     const path = try std.fmt.bufPrintZ(&path_buf, "{u}_sdf.png", .{codepoint});

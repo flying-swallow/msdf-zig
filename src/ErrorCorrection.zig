@@ -1,12 +1,10 @@
 const std = @import("std");
 
 const EdgeSegment = @import("EdgeSegment.zig");
-const equations = @import("equations.zig");
 const f64i = @import("Generator.zig").f64i;
 const findDistanceAt = @import("Generator.zig").findDistanceAt;
 const math = @import("math.zig");
 const Shape = @import("Shape.zig");
-const SignedDistance = @import("SignedDistance.zig");
 
 const Vec2 = @Vector(2, f64);
 
@@ -34,6 +32,10 @@ const StencilFlags = packed struct {
 const ClassifierFlags = packed struct {
     candidate: bool = false,
     artifact: bool = false,
+
+    pub fn merge(self: ClassifierFlags, other: ClassifierFlags) ClassifierFlags {
+        return @bitCast(@as(u2, @bitCast(self)) | @as(u2, @bitCast(other)));
+    }
 };
 
 const ColorFlags = packed struct {
@@ -137,8 +139,8 @@ pub fn protectCorners(self: *ErrorCorrection, shape: *Shape, scale: f64, tfm: Ve
             prev_edge = edge;
             if ((common_color & (common_color - 1)) == 0) continue;
             const base_point = edge.point(0) * math.v2(scale) + tfm;
-            const left: i32 = @intFromFloat(@floor(base_point[0] - 0.5));
-            const bottom: i32 = @intFromFloat(f64i(self.stencil_h) - @floor(base_point[1] - 0.5) - 2.0);
+            const left: i32 = @trunc(base_point[0] - 0.5);
+            const bottom: i32 = @trunc(f64i(self.stencil_h) - @floor(base_point[1] - 0.5) - 2.0);
             const right = left + 1;
             const top = bottom + 1;
             if (left < self.stencil_w and bottom < self.stencil_h and right >= 0 and top >= 0) {
@@ -292,8 +294,8 @@ fn evaluateArtifact(self: *const ErrorCorrection, flags: ClassifierFlags, t: f64
     const bt = tx_y - floor_y;
     const sdf_w = self.dist_eval.sdf_w;
     const sdf_h = self.dist_eval.sdf_h;
-    const left = @min(@as(u32, @intFromFloat(floor_x)), sdf_w - 1);
-    const bottom = @min(@as(u32, @intFromFloat(floor_y)), sdf_w - 1);
+    const left = @min(@as(u32, @trunc(floor_x)), sdf_w - 1);
+    const bottom = @min(@as(u32, @trunc(floor_y)), sdf_w - 1);
     const right = @min(left + 1, sdf_h - 1);
     const top = @min(bottom + 1, sdf_h - 1);
     const sdf_px = self.dist_eval.sdf_px;
@@ -343,34 +345,43 @@ fn hasDiagonalArtifactInner(
     t_ex_0: f64,
     t_ex_1: f64,
 ) bool {
-    var t: [2]f64 = undefined;
-    const solutions = equations.solveQuadratic(&t, d_d - d_bc + d_a, d_bc - d_a - d_a, d_a);
-    for (0..solutions) |i| if (t[i] > artifact_t_epsilon and t[i] < 1 - artifact_t_epsilon) {
-        const xm = interpolatedMedianBilinear(a, l, q, t[i]);
-        if (rangeTest(span, protected, 0, 1, t[i], am, dm, xm).artifact) return true;
-        var t_end: [2]f64 = undefined;
-        var em: [2]f64 = undefined;
+    var buf: [2]f64 = undefined;
+    for (math.solveEquation(&buf, .{
+        .a = d_d - d_bc + d_a,
+        .b = d_bc - d_a - d_a,
+        .c = d_a,
+    })) |root|
+        if (root > artifact_t_epsilon and root < 1 - artifact_t_epsilon) {
+            const xm = interpolatedMedianBilinear(a, l, q, root);
+            if (rangeTest(span, protected, 0, 1, root, am, dm, xm).artifact)
+                return true;
 
-        if (t_ex_0 > 0 and t_ex_0 < 1) {
-            t_end[0] = 0;
-            t_end[1] = 1;
-            em[0] = am;
-            em[1] = dm;
-            t_end[@intFromBool(t_ex_0 > t[i])] = t_ex_0;
-            em[@intFromBool(t_ex_0 > t[i])] = interpolatedMedianBilinear(a, l, q, t_ex_0);
-            if (rangeTest(span, protected, t_end[0], t_end[1], t[i], em[0], em[1], xm).artifact) return true;
-        }
+            var t_end: [2]f64 = undefined;
+            var em: [2]f64 = undefined;
 
-        if (t_ex_1 > 0 and t_ex_1 < 1) {
-            t_end[0] = 0;
-            t_end[1] = 1;
-            em[0] = am;
-            em[1] = dm;
-            t_end[@intFromBool(t_ex_1 > t[i])] = t_ex_1;
-            em[@intFromBool(t_ex_1 > t[i])] = interpolatedMedianBilinear(a, l, q, t_ex_1);
-            if (rangeTest(span, protected, t_end[0], t_end[1], t[i], em[0], em[1], xm).artifact) return true;
-        }
-    };
+            if (t_ex_0 > 0 and t_ex_0 < 1) {
+                t_end[0] = 0;
+                t_end[1] = 1;
+                em[0] = am;
+                em[1] = dm;
+                t_end[@intFromBool(t_ex_0 > root)] = t_ex_0;
+                em[@intFromBool(t_ex_0 > root)] = interpolatedMedianBilinear(a, l, q, t_ex_0);
+                if (rangeTest(span, protected, t_end[0], t_end[1], root, em[0], em[1], xm).artifact)
+                    return true;
+            }
+
+            if (t_ex_1 > 0 and t_ex_1 < 1) {
+                t_end[0] = 0;
+                t_end[1] = 1;
+                em[0] = am;
+                em[1] = dm;
+                t_end[@intFromBool(t_ex_1 > root)] = t_ex_1;
+                em[@intFromBool(t_ex_1 > root)] = interpolatedMedianBilinear(a, l, q, t_ex_1);
+                if (rangeTest(span, protected, t_end[0], t_end[1], root, em[0], em[1], xm).artifact)
+                    return true;
+            }
+        };
+
     return false;
 }
 
@@ -422,13 +433,11 @@ fn hasDiagonalArtifact(
         a[1] - b[1] - c[1],
         a[2] - b[2] - c[2],
     };
-
     const q: [3]f64 = .{
         d[0] + abc[0],
         d[1] + abc[1],
         d[2] + abc[2],
     };
-
     const l: [3]f64 = .{
         -a[0] - abc[0],
         -a[1] - abc[1],
@@ -439,6 +448,7 @@ fn hasDiagonalArtifact(
         -0.5 * l[1] / q[1],
         -0.5 * l[2] / q[2],
     };
+
     for (0..3) |idx| {
         const next_idx = (idx + 1) % 3;
         const d_a = a[next_idx] - a[idx];
@@ -447,13 +457,15 @@ fn hasDiagonalArtifact(
         const t_ex_0 = t_ex[idx];
         const t_ex_1 = t_ex[next_idx];
 
-        var t: [2]f64 = undefined;
-        const solutions = equations.solveQuadratic(&t, d_d - d_bc + d_a, d_bc - d_a - d_a, d_a);
-        for (0..solutions) |i|
-            if (t[i] > artifact_t_epsilon and t[i] < 1 - artifact_t_epsilon) {
-                const xm = interpolatedMedianBilinear(a, &l, &q, t[i]);
-                const FlagType = @typeInfo(ClassifierFlags).@"struct".backing_integer.?;
-                var flags: FlagType = @bitCast(rangeTest(span, protected, 0, 1, t[i], am, dm, xm));
+        var buf: [2]f64 = undefined;
+        for (math.solveEquation(&buf, &.{
+            .a = d_d - d_bc + d_a,
+            .b = d_bc - d_a - d_a,
+            .c = d_a,
+        })) |root|
+            if (root > artifact_t_epsilon and root < 1 - artifact_t_epsilon) {
+                const xm = interpolatedMedianBilinear(a, &l, &q, root);
+                var flags = rangeTest(span, protected, 0, 1, root, am, dm, xm);
                 var t_end: [2]f64 = undefined;
                 var em: [2]f64 = undefined;
 
@@ -462,9 +474,9 @@ fn hasDiagonalArtifact(
                     t_end[1] = 1;
                     em[0] = am;
                     em[1] = dm;
-                    t_end[@intFromBool(t_ex_0 > t[i])] = t_ex_0;
-                    em[@intFromBool(t_ex_0 > t[i])] = interpolatedMedianBilinear(a, &l, &q, t_ex_0);
-                    flags |= @as(FlagType, @bitCast(rangeTest(span, protected, t_end[0], t_end[1], t[i], em[0], em[1], xm)));
+                    t_end[@intFromBool(t_ex_0 > root)] = t_ex_0;
+                    em[@intFromBool(t_ex_0 > root)] = interpolatedMedianBilinear(a, &l, &q, t_ex_0);
+                    flags = flags.merge(rangeTest(span, protected, t_end[0], t_end[1], root, em[0], em[1], xm));
                 }
 
                 if (t_ex_1 > 0 and t_ex_1 < 1) {
@@ -472,12 +484,12 @@ fn hasDiagonalArtifact(
                     t_end[1] = 1;
                     em[0] = am;
                     em[1] = dm;
-                    t_end[@intFromBool(t_ex_1 > t[i])] = t_ex_1;
-                    em[@intFromBool(t_ex_1 > t[i])] = interpolatedMedianBilinear(a, &l, &q, t_ex_1);
-                    flags |= @as(FlagType, @bitCast(rangeTest(span, protected, t_end[0], t_end[1], t[i], em[0], em[1], xm)));
+                    t_end[@intFromBool(t_ex_1 > root)] = t_ex_1;
+                    em[@intFromBool(t_ex_1 > root)] = interpolatedMedianBilinear(a, &l, &q, t_ex_1);
+                    flags = flags.merge(rangeTest(span, protected, t_end[0], t_end[1], root, em[0], em[1], xm));
                 }
 
-                if (self.evaluateArtifact(@bitCast(flags), t[i]))
+                if (self.evaluateArtifact(flags, root))
                     return true;
             };
     }

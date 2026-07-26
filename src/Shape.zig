@@ -1,6 +1,5 @@
 const std = @import("std");
 
-const Contour = @import("Contour.zig");
 const EdgeSegment = @import("EdgeSegment.zig");
 const math = @import("math.zig");
 const Scanline = @import("Scanline.zig");
@@ -11,11 +10,35 @@ const deconverge_overshoot = 1.11111111111111111;
 const corner_dot_epsilon = 0.000001;
 
 const Shape = @This();
+
+pub const Contour = struct {
+    edges: std.ArrayList(EdgeSegment) = .empty,
+
+    pub fn reverse(self: *Contour) void {
+        std.mem.reverse(EdgeSegment, self.edges.items);
+        for (self.edges.items) |*edge| edge.reverse();
+    }
+};
+
 pub const Bounds = struct {
-    left: f64 = 0.0,
-    right: f64 = 0.0,
-    bottom: f64 = 0.0,
-    top: f64 = 0.0,
+    left: f64,
+    right: f64,
+    bottom: f64,
+    top: f64,
+
+    pub const whole_frame: Bounds = .{
+        .left = 0.0,
+        .right = 1.0,
+        .bottom = 0.0,
+        .top = 1.0,
+    };
+
+    pub fn bound(self: *Bounds, x: f64, y: f64) void {
+        self.left = @min(self.left, x);
+        self.bottom = @min(self.bottom, y);
+        self.right = @max(self.right, x);
+        self.top = @max(self.top, y);
+    }
 };
 
 contours: std.ArrayList(Contour) = .empty,
@@ -24,15 +47,6 @@ pub fn deinit(self: *Shape, allocator: std.mem.Allocator) void {
     for (self.contours.items) |*contour|
         contour.edges.deinit(allocator);
     self.contours.deinit(allocator);
-}
-
-pub fn format(self: Shape, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    try writer.print("Number of contours: {}\n", .{self.contours.items.len});
-    for (self.contours.items, 0..) |contour, i| {
-        try writer.print("Contour {}: [\n", .{i});
-        for (contour.edges.items, 0..) |edge, j| try writer.print(" Edge {}: {f}\n", .{ j, edge });
-        try writer.print("];\n", .{});
-    }
 }
 
 pub fn validate(self: Shape) bool {
@@ -51,8 +65,7 @@ pub fn validate(self: Shape) bool {
 pub fn normalize(self: *Shape, allocator: std.mem.Allocator) !void {
     for (self.contours.items) |*contour| {
         if (contour.edges.items.len == 1) {
-            var parts: [3]EdgeSegment = @splat(.{});
-            contour.edges.items[0].splitInThirds(&parts);
+            const parts = contour.edges.items[0].splitInThirds();
             contour.edges.clearRetainingCapacity();
             try contour.edges.appendSlice(allocator, &parts);
         } else {
@@ -66,40 +79,28 @@ pub fn normalize(self: *Shape, allocator: std.mem.Allocator) !void {
                     var axis = math.normal(cur_dir - prev_dir, true) * math.v2(factor);
                     if (convergentCurveOrdering(prev_edge, edge))
                         axis = -axis;
-                    prev_edge.deconverge(1, math.ortho(axis, true));
-                    edge.deconverge(0, math.ortho(axis, false));
+
+                    const ortho = math.ortho(axis);
+                    prev_edge.deconverge(1, ortho);
+                    edge.deconverge(0, -ortho);
                 }
+
                 prev_edge = edge;
             }
         }
     }
 }
 
-pub fn bound(self: Shape, l: *f64, b: *f64, r: *f64, t: *f64) void {
-    for (self.contours.items) |contour| contour.bound(l, b, r, t);
-}
-
-pub fn boundMiters(self: Shape, l: *f64, b: *f64, r: *f64, t: *f64, border: f64, miter_limit: f64, polarity: i32) void {
-    for (self.contours.items) |contour| contour.boundMiters(l, b, r, t, border, miter_limit, polarity);
-}
-
-pub fn getBounds(self: Shape, border: f64, miter_limit: f64, polarity: i32) Bounds {
-    const large_value = 1e240;
+pub fn calcBounds(self: Shape) Bounds {
     var bounds: Bounds = .{
-        .left = large_value,
-        .bottom = large_value,
-        .right = -large_value,
-        .top = -large_value,
+        .left = std.math.floatMax(f64),
+        .bottom = std.math.floatMax(f64),
+        .right = std.math.floatMin(f64),
+        .top = std.math.floatMin(f64),
     };
-    self.bound(&bounds.left, &bounds.bottom, &bounds.right, &bounds.top);
-    if (border > 0) {
-        bounds.left -= border;
-        bounds.bottom -= border;
-        bounds.right += border;
-        bounds.top += border;
-        if (miter_limit > 0)
-            self.boundMiters(&bounds.left, &bounds.bottom, &bounds.right, &bounds.top, border, miter_limit, polarity);
-    }
+    for (self.contours.items) |contour|
+        for (contour.edges.items) |edge|
+            edge.bound(&bounds);
     return bounds;
 }
 
@@ -113,12 +114,6 @@ pub fn scanline(self: Shape, line: *Scanline, y: f64, allocator: std.mem.Allocat
         const len = edge.scanlineIntersections(&x, &dy, y);
         for (0..len) |i| try line.intersections.append(allocator, .{ .x = x[i], .dir = dy[i] });
     };
-}
-
-pub fn edgeCount(self: Shape) u32 {
-    var total: u32 = 0;
-    for (self.contours.items) |contour| total += contour.edges.items.len;
-    return total;
 }
 
 pub fn orientContours(self: *Shape, allocator: std.mem.Allocator) !void {
@@ -167,7 +162,8 @@ pub fn orientContours(self: *Shape, allocator: std.mem.Allocator) !void {
         intersections.clearRetainingCapacity();
     }
 
-    for (self.contours.items, orientations.items) |*contour, orientation| if (orientation < 0) contour.reverse();
+    for (self.contours.items, orientations.items) |*contour, orientation|
+        if (orientation < 0) contour.reverse();
 }
 
 fn simplifyDegenerateCurve(ctrl: []Vec2, len: *u8) void {
