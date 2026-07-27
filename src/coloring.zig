@@ -112,7 +112,7 @@ fn isCorner(a: Vec2, b: Vec2, cross_threshold: f64) bool {
 
 fn findCorners(allocator: std.mem.Allocator, contour: *const Shape.Contour, corners: *std.ArrayList(u32), cross_threshold: f64) !void {
     corners.clearRetainingCapacity();
-    var prev_dir = math.normal(contour.edges.items[contour.edges.items.len - 1].direction(1), true);
+    var prev_dir = math.normal(contour.edges.getLast().?.direction(1), true);
     for (contour.edges.items, 0..) |edge, i| {
         const edge_dir = math.normal(edge.direction(0), true);
         if (isCorner(prev_dir, edge_dir, cross_threshold))
@@ -233,7 +233,7 @@ pub fn colorInkTrap(
         var spline_length: f64 = 0.0;
 
         corners.clearRetainingCapacity();
-        var prev_dir = math.normal(contour.edges.items[contour.edges.items.len - 1].direction(1), true);
+        var prev_dir = math.normal(contour.edges.getLast().?.direction(1), true);
         for (contour.edges.items, 0..) |edge, i| {
             const edge_dir = math.normal(edge.direction(0), true);
             if (isCorner(prev_dir, edge_dir, cross_threshold)) {

@@ -133,7 +133,7 @@ pub fn protectCorners(self: *ErrorCorrection, shape: *Shape, scale: f64, tfm: Ve
     for (shape.contours.items) |contour| {
         if (contour.edges.items.len == 0) continue;
 
-        var prev_edge = contour.edges.items[contour.edges.items.len - 1];
+        var prev_edge = contour.edges.getLast().?;
         for (contour.edges.items) |edge| {
             const common_color = @backingInt(prev_edge.color) & @backingInt(edge.color);
             prev_edge = edge;
