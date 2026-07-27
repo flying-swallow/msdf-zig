@@ -12,6 +12,15 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const test_step = b.step("test", "Run core and raster-quality tests");
+    const core_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/core_test_root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(core_tests).step);
 
     // The FreeType font-atlas frontend. Optional: a core-only consumer passes `.font = false` to
     // skip it, so `mach_freetype`/`turbopack` (both lazy in build.zig.zon) are never fetched. It
@@ -36,8 +45,7 @@ pub fn build(b: *std.Build) void {
         },
     });
 
-    // The differential tests read the committed fixtures and the example font by
-    // repo-relative path, so the run step needs the build root as its cwd.
+    // The raster tests load the example fonts by repo-relative path.
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/test_root.zig"),
         .target = target,
@@ -51,6 +59,5 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(tests);
     run_tests.setCwd(b.path("."));
 
-    const test_step = b.step("test", "Compare generated SDFs against the msdfgen reference fixtures");
     test_step.dependOn(&run_tests.step);
 }

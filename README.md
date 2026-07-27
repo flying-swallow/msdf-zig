@@ -43,5 +43,26 @@ for ([_]u21{ 'A', 'B', 'C' }) |codepoint| {
 
 A more in-depth example can be found in `example/generate.zig`.
 
+### FreeType-free shape generation
+
+Consumers that already have vector geometry can import `msdf-core` without
+fetching or linking FreeType and turbopack. Build a `Shape` from
+`Shape.Contour` and `EdgeSegment` values, then call:
+
+```zig
+const msdf = @import("msdf-core");
+
+const opts: msdf.Options = .{
+    .sdf_type = .msdf,
+    .px_size = 64,
+    .px_range = 8,
+};
+const data = try msdf.generateFromShape(allocator, &shape, &opts);
+defer data.deinit(allocator);
+```
+
+Pass `-Dfont=false` when building only the core module. Shape preprocessing and
+coloring use the same options and implementation as the font generator.
+
 ## Disclaimer
 This library might provide an option for it later, but you currently need to preprocess your fonts manually to resolve overlapping contours (if the font has them).

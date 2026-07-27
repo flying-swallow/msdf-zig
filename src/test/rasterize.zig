@@ -25,7 +25,7 @@ const Case = struct {
     name: []const u8,
     font: usize,
     codepoint: u21,
-    opts: Generator.GenerationOptions,
+    opts: Generator.Options,
 };
 
 fn smoothstep(edge0: f64, edge1: f64, x: f64) f64 {
@@ -67,36 +67,47 @@ fn runCase(allocator: std.mem.Allocator, io: std.Io, font: []const u8, case: Cas
     var generator: Generator = try .create(font);
     defer generator.destroy();
 
-    var result = try generator.generateSingle(allocator, case.codepoint, case.opts);
+    var result = try generator.generateSingle(allocator, case.codepoint, &case.opts);
     defer result.deinit(allocator);
 
-    const pixels = switch (result.pixels) {
-        .normal => |p| p,
-        .msdf10 => return error.UnexpectedPixelFormat,
-    };
+    const pixels = result.pixels;
+
+    var ref_library: ft.Library = try .init();
+    defer ref_library.deinit();
+    const ref_face = try ref_library.createFaceMemory(font, 0);
+    defer ref_face.deinit();
+    const glyph_index = ref_face.getCharIndex(case.codepoint) orelse return error.InvalidCodepoint;
+    try ref_face.loadGlyph(glyph_index, .{ .no_scale = true, .no_bitmap = true });
+    const outline_bounds = try ref_face.glyph().outline().?.bbox();
+    const units_per_em = f64i(ref_face.unitsPerEM());
 
     const target_sizes = [_]u32{ 12, 16, 24, 32, 48, 64, 96 };
     const channels = case.opts.sdf_type.numChannels();
-    const w = result.glyph_data.width;
-    const h = result.glyph_data.height;
+    const w = result.metrics.width;
+    const h = result.metrics.height;
 
     if (w == 0 or h == 0) return; // empty glyph
 
-    const bounds = result.glyph_data.bounds;
+    const bounds = .{
+        .left = f64i(outline_bounds.xMin) / units_per_em,
+        .right = f64i(outline_bounds.xMax) / units_per_em,
+        .bottom = f64i(outline_bounds.yMin) / units_per_em,
+        .top = f64i(outline_bounds.yMax) / units_per_em,
+    };
 
     for (target_sizes) |ts| {
-        try generator.face.setPixelSizes(ts, ts);
+        try ref_face.setPixelSizes(ts, ts);
 
-        try generator.face.loadGlyph(generator.face.getCharIndex(case.codepoint).?, .{ .no_hinting = true });
-        try generator.face.glyph().render(.normal);
+        try ref_face.loadGlyph(ref_face.getCharIndex(case.codepoint).?, .{ .no_hinting = true });
+        try ref_face.glyph().render(.normal);
 
-        const ft_bitmap = generator.face.glyph().bitmap();
+        const ft_bitmap = ref_face.glyph().bitmap();
         const ft_buf = ft_bitmap.buffer() orelse &[_]u8{};
         const ft_w = ft_bitmap.width();
         const ft_h = ft_bitmap.rows();
         const ft_pitch = ft_bitmap.pitch();
-        const ft_left = generator.face.glyph().bitmapLeft();
-        const ft_top = generator.face.glyph().bitmapTop();
+        const ft_left = ref_face.glyph().bitmapLeft();
+        const ft_top = ref_face.glyph().bitmapTop();
 
         const px_range_em = f64i(case.opts.px_range) / f64i(case.opts.px_size);
         // generateSingle positions the bitmap from the outline's exact bounds.
@@ -275,7 +286,8 @@ fn buildCases(allocator: std.mem.Allocator) ![]Case {
                                     .sdf_type = t.ty,
                                     .px_size = px_size,
                                     .px_range = px_range,
-                                    .geometry_preprocess = geom,
+                                    .normalize_shape = geom,
+                                    .orient_contours = geom,
                                     .scanline_fill_rule = if (scan) .non_zero else null,
                                     .error_correction_opts = if (ec) .{} else null,
                                 },

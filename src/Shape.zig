@@ -1,7 +1,5 @@
 const std = @import("std");
 
-const Contour = @import("Contour.zig");
-const convergent_curve_ordering = @import("convergent_curve_ordering.zig");
 const EdgeSegment = @import("EdgeSegment.zig");
 const math = @import("math.zig");
 const Scanline = @import("Scanline.zig");
@@ -12,22 +10,43 @@ const deconverge_overshoot = 1.11111111111111111;
 const corner_dot_epsilon = 0.000001;
 
 const Shape = @This();
+
+pub const Contour = struct {
+    edges: std.ArrayList(EdgeSegment) = .empty,
+
+    pub fn reverse(self: *Contour) void {
+        std.mem.reverse(EdgeSegment, self.edges.items);
+        for (self.edges.items) |*edge| edge.reverse();
+    }
+};
+
 pub const Bounds = struct {
-    left: f64 = 0.0,
-    right: f64 = 0.0,
-    bottom: f64 = 0.0,
-    top: f64 = 0.0,
+    left: f64,
+    right: f64,
+    bottom: f64,
+    top: f64,
+
+    pub const whole_frame: Bounds = .{
+        .left = 0.0,
+        .right = 1.0,
+        .bottom = 0.0,
+        .top = 1.0,
+    };
+
+    pub fn bound(self: *Bounds, x: f64, y: f64) void {
+        self.left = @min(self.left, x);
+        self.bottom = @min(self.bottom, y);
+        self.right = @max(self.right, x);
+        self.top = @max(self.top, y);
+    }
 };
 
 contours: std.ArrayList(Contour) = .empty,
 
-pub fn format(self: Shape, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-    try writer.print("Number of contours: {}\n", .{self.contours.items.len});
-    for (self.contours.items, 0..) |contour, i| {
-        try writer.print("Contour {}: [\n", .{i});
-        for (contour.edges.items, 0..) |edge, j| try writer.print(" Edge {}: {f}\n", .{ j, edge });
-        try writer.print("];\n", .{});
-    }
+pub fn deinit(self: *Shape, allocator: std.mem.Allocator) void {
+    for (self.contours.items) |*contour|
+        contour.edges.deinit(allocator);
+    self.contours.deinit(allocator);
 }
 
 pub fn validate(self: Shape) bool {
@@ -49,7 +68,7 @@ pub fn normalize(self: *Shape, allocator: std.mem.Allocator) !void {
             const parts = contour.edges.items[0].splitInThirds();
             contour.edges.clearRetainingCapacity();
             try contour.edges.appendSlice(allocator, &parts);
-        } else if (contour.edges.items.len > 0) {
+        } else {
             var prev_edge = &contour.edges.items[contour.edges.items.len - 1];
             for (contour.edges.items) |*edge| {
                 const prev_dir = math.normal(prev_edge.direction(1), true);
@@ -58,40 +77,31 @@ pub fn normalize(self: *Shape, allocator: std.mem.Allocator) !void {
                     const factor = deconverge_overshoot *
                         @sqrt(1 - (corner_dot_epsilon - 1) * (corner_dot_epsilon - 1)) / (corner_dot_epsilon - 1);
                     var axis = math.normal(cur_dir - prev_dir, true) * math.v2(factor);
-                    if (convergent_curve_ordering.convergentCurveOrdering(prev_edge.*, edge.*) < 0)
-                        axis *= math.v2(-1.0);
-                    prev_edge.* = prev_edge.deconverge(1, math.ortho(axis, true));
-                    edge.* = edge.deconverge(0, math.ortho(axis, false));
+                    if (convergentCurveOrdering(prev_edge, edge))
+                        axis = -axis;
+
+                    const ortho = math.ortho(axis);
+                    prev_edge.deconverge(1, ortho);
+                    edge.deconverge(0, -ortho);
                 }
+
                 prev_edge = edge;
             }
         }
     }
 }
 
-pub fn bound(self: Shape, a: math.RectangleBound(f64)) math.RectangleBound(f64) {
-    var bounds = a;
-    for (self.contours.items) |contour| bounds = contour.bound(bounds);
+pub fn calcBounds(self: Shape) Bounds {
+    var bounds: Bounds = .{
+        .left = std.math.floatMax(f64),
+        .bottom = std.math.floatMax(f64),
+        .right = std.math.floatMin(f64),
+        .top = std.math.floatMin(f64),
+    };
+    for (self.contours.items) |contour|
+        for (contour.edges.items) |edge|
+            edge.bound(&bounds);
     return bounds;
-}
-
-pub fn boundMiters(self: Shape, a: math.RectangleBound(f64), border: f64, miter_limit: f64, polarity: i32) math.RectangleBound(f64) {
-    var bounds = a;
-    for (self.contours.items) |contour| bounds = contour.boundMiters(bounds, border, miter_limit, polarity);
-    return bounds;
-}
-
-pub fn getBounds(self: Shape, border: f64, miter_limit: f64, polarity: i32) Bounds {
-    var bounds = self.bound(.empty);
-    if (border > 0) {
-        bounds.l -= border;
-        bounds.b -= border;
-        bounds.r += border;
-        bounds.t += border;
-        if (miter_limit > 0)
-            bounds = self.boundMiters(bounds, border, miter_limit, polarity);
-    }
-    return .{ .left = bounds.l, .bottom = bounds.b, .right = bounds.r, .top = bounds.t };
 }
 
 pub fn scanline(self: Shape, line: *Scanline, y: f64, allocator: std.mem.Allocator) !void {
@@ -126,25 +136,11 @@ pub fn orientContours(self: *Shape, allocator: std.mem.Allocator) !void {
     try orientations.ensureTotalCapacity(allocator, contours_len);
     try orientations.appendNTimes(allocator, 0, contours_len);
     for (0..contours_len) |i| {
-        // Skip contours already resolved by an earlier scanline, and empty ones.
-        // Note the polarity: a zero orientation means "not yet determined", so
-        // that is exactly the case this loop exists to handle.
-        if (orientations.items[i] != 0 or self.contours.items[i].edges.items.len == 0) continue;
-
-        // Find a Y that actually crosses the contour. Both loops stop as soon as
-        // they find one -- without the guard the last edge would simply win, and
-        // the second pass (which samples mid-edge, for contours whose endpoints
-        // are all colinear in Y) would clobber the first.
+        if (orientations.items[i] == 0 or self.contours.items[i].edges.items.len == 0) continue;
         const y0 = self.contours.items[i].edges.items[0].point(0)[1];
         var y1 = y0;
-        for (self.contours.items[i].edges.items) |edge| {
-            if (y0 != y1) break;
-            y1 = edge.point(1)[1];
-        }
-        for (self.contours.items[i].edges.items) |edge| {
-            if (y0 != y1) break;
-            y1 = edge.point(ratio)[1];
-        }
+        for (self.contours.items[i].edges.items) |edge| y1 = edge.point(1)[1];
+        for (self.contours.items[i].edges.items) |edge| y1 = edge.point(ratio)[1];
         const y = math.mix(y0, y1, ratio);
         var x: [3]f64 = @splat(0.0);
         var dy: [3]i32 = @splat(0);
@@ -166,5 +162,122 @@ pub fn orientContours(self: *Shape, allocator: std.mem.Allocator) !void {
         intersections.clearRetainingCapacity();
     }
 
-    for (self.contours.items, orientations.items) |*contour, orientation| if (orientation < 0) contour.reverse();
+    for (self.contours.items, orientations.items) |*contour, orientation|
+        if (orientation < 0) contour.reverse();
+}
+
+fn simplifyDegenerateCurve(ctrl: []Vec2, len: *u8) void {
+    const eql = std.meta.eql;
+    switch (len.*) {
+        3 => if ((eql(ctrl[1], ctrl[0]) or eql(ctrl[1], ctrl[3])) and
+            (eql(ctrl[2], ctrl[0]) or eql(ctrl[2], ctrl[3])))
+        {
+            ctrl[1] = ctrl[3];
+            len.* = 1;
+        },
+        2 => if (eql(ctrl[1], ctrl[0]) or eql(ctrl[1], ctrl[2])) {
+            ctrl[1] = ctrl[2];
+            len.* = 1;
+        },
+        1 => {
+            if (eql(ctrl[0], ctrl[1])) len.* = 0;
+        },
+        else => {},
+    }
+}
+
+fn convergentCurveOrdering(a: *const EdgeSegment, b: *const EdgeSegment) bool {
+    const eql = std.meta.eql;
+
+    var a_pts: [4]Vec2 = undefined;
+    var a_len: u8 = 0;
+    switch (a.segment) {
+        inline else => |pts| {
+            // these exclude zero
+            a_len = pts.len - 1;
+            @memcpy(a_pts[0..pts.len], &pts);
+        },
+    }
+
+    var b_pts: [4]Vec2 = undefined;
+    var b_len: u8 = 0;
+    switch (b.segment) {
+        inline else => |pts| {
+            b_len = pts.len - 1;
+            @memcpy(b_pts[0..pts.len], &pts);
+        },
+    }
+
+    if (!eql(a_pts[0], b_pts[0]))
+        return false;
+
+    simplifyDegenerateCurve(&a_pts, &a_len);
+    simplifyDegenerateCurve(&b_pts, &b_len);
+
+    var a1: Vec2 = a_pts[a_len - 1] - b_pts[0];
+    var b1: Vec2 = b_pts[1] - b_pts[0];
+    var a2: Vec2 = if (a_len >= 2) a_pts[a_len - 2] - a_pts[a_len - 1] - a1 else @splat(0.0);
+    var b2: Vec2 = if (b_len >= 2) b_pts[2] - b_pts[1] - b1 else @splat(0.0);
+    var a3: Vec2 = @splat(0.0);
+    var b3: Vec2 = @splat(0.0);
+    if (a_len >= 3) {
+        a3 = a_pts[a_len - 3] - a_pts[a_len - 2] - (a_pts[a_len - 2] - a_pts[a_len - 1]) - a2;
+        a2 *= math.v2(3.0);
+    }
+
+    if (b_len >= 3) {
+        b3 = b_pts[3] - b_pts[2] - (b_pts[2] - b_pts[1]) - b2;
+        b2 *= math.v2(3.0);
+    }
+
+    a1 *= math.v2(a_len);
+    b1 *= math.v2(b_len);
+
+    const a_filled = !eql(a1, @splat(0.0));
+    const b_filled = !eql(b1, @splat(0.0));
+    if (a_filled and b_filled) {
+        const as = math.length(a1);
+        const bs = math.length(b1);
+
+        inline for (.{
+            as * math.cross(a1, b2) + bs * math.cross(a2, b1),
+            as * as * math.cross(a1, b3) + as * bs * math.cross(a2, b2) + bs * bs * math.cross(a3, b1),
+            as * math.cross(a2, b3) + bs * math.cross(a3, b2),
+            math.cross(a3, b3),
+        }) |derivative| {
+            if (derivative < 0.0) return true;
+            if (derivative > 0.0) return false;
+        }
+    }
+
+    var flip = false;
+    if (a_filled) {
+        std.mem.swap(Vec2, &a1, &b1);
+        std.mem.swap(Vec2, &a2, &b2);
+        std.mem.swap(Vec2, &a3, &b3);
+        flip = true;
+    }
+
+    if (b_filled) {
+        inline for (.{
+            math.cross(a3, b1),
+            math.cross(a2, b2),
+            math.cross(a3, b2),
+            math.cross(a2, b3),
+            math.cross(a3, b3),
+        }) |derivative| {
+            if (derivative < 0.0) return !flip;
+            if (derivative > 0.0) return flip;
+        }
+    }
+
+    inline for (.{
+        @sqrt(math.length(a2)) * math.cross(a2, b3) + @sqrt(math.length(b2)) * math.cross(a3, b2),
+        math.cross(a3, b3),
+    }) |derivative| {
+        if (derivative < 0.0) return true;
+        if (derivative > 0.0) return false;
+    }
+
+    return false;
 }

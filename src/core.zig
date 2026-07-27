@@ -10,20 +10,20 @@ const sdf = @import("sdf.zig");
 
 // Geometry model — build shapes by hand.
 pub const Shape = @import("Shape.zig");
-pub const Contour = @import("Contour.zig");
+pub const Contour = Shape.Contour;
 pub const EdgeSegment = @import("EdgeSegment.zig");
-pub const EdgeColor = @import("edge_color.zig").EdgeColor;
+pub const EdgeColor = @import("coloring.zig").EdgeColor;
 
 // Generation.
 pub const generateFromShape = sdf.generateFromShape;
 pub const ShapeData = sdf.ShapeData;
-pub const GenerationOptions = sdf.GenerationOptions;
+pub const Options = sdf.Options;
 pub const SdfType = sdf.SdfType;
-pub const OrientationType = sdf.OrientationType;
-pub const Pixels = sdf.Pixels;
+pub const ColoringMethod = sdf.ColoringMethod;
+pub const Winding = sdf.Winding;
 pub const Msdf10Pixel = sdf.Msdf10Pixel;
 
-// Referenced by GenerationOptions (scanline_fill_rule / error_correction_opts), re-exported so a
+// Referenced by Options (scanline_fill_rule / error_correction_opts), re-exported so a
 // consumer can name those option types.
 pub const Scanline = @import("Scanline.zig");
 pub const ErrorCorrection = @import("ErrorCorrection.zig");
