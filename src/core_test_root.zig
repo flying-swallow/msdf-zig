@@ -1,4 +1,4 @@
 test {
     _ = @import("test/core.zig");
-    _ = @import("pixel_conversion.zig");
+    _ = @import("math.zig");
 }

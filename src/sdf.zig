@@ -4,7 +4,6 @@ const coloring = @import("coloring.zig");
 const distance_eval = @import("distance.zig");
 const ErrorCorrection = @import("ErrorCorrection.zig");
 const math = @import("math.zig");
-const pixel_conversion = @import("pixel_conversion.zig");
 const Scanline = @import("Scanline.zig");
 const Shape = @import("Shape.zig");
 const types = @import("sdf_types.zig");
@@ -183,13 +182,13 @@ pub fn getSdfPixels(
         const distance_idx = y * w * channels + x * channels;
         if (opts.sdf_type == .msdf10)
             pixels[y * w * 4 + x * 4 ..][0..4].* = std.mem.toBytes(Msdf10Pixel{
-                .r = pixel_conversion.floatToUnorm(u10, dist_pixels[distance_idx]),
-                .g = pixel_conversion.floatToUnorm(u10, dist_pixels[distance_idx + 1]),
-                .b = pixel_conversion.floatToUnorm(u10, dist_pixels[distance_idx + 2]),
+                .r = math.floatToUnorm(u10, dist_pixels[distance_idx]),
+                .g = math.floatToUnorm(u10, dist_pixels[distance_idx + 1]),
+                .b = math.floatToUnorm(u10, dist_pixels[distance_idx + 2]),
                 .a = std.math.maxInt(u2),
             })
         else for (0..mod_channels) |i|
-            pixels[pixel_idx + i] = pixel_conversion.floatToUnorm(u8, dist_pixels[distance_idx + i]);
+            pixels[pixel_idx + i] = math.floatToUnorm(u8, dist_pixels[distance_idx + i]);
     };
     return pixels;
 }
