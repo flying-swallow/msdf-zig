@@ -350,3 +350,147 @@ test "Generator preserves public option and distance APIs" {
     const shape: Shape = .{};
     _ = Generator.findDistanceAt(.sdf, shape, .{ 0, 0 }, 1);
 }
+
+test "Generator reports font metrics and handles empty and missing glyphs" {
+    const allocator = std.testing.allocator;
+
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const font = try std.Io.Dir.cwd().readFileAlloc(io, fonts[0].path, allocator, .unlimited);
+    defer allocator.free(font);
+
+    var generator: Generator = try .create(font);
+    defer generator.destroy();
+
+    const metrics = try generator.fontMetrics();
+    try std.testing.expect(metrics.line_height > 0);
+    try std.testing.expect(metrics.ascender > metrics.descender);
+    try std.testing.expect(metrics.underline_thickness >= 0);
+
+    const opts: Generator.Options = .{
+        .sdf_type = .sdf,
+        .px_size = px_size,
+        .px_range = px_range,
+    };
+
+    var space = try generator.generateSingle(allocator, ' ', &opts);
+    defer space.deinit(allocator);
+    try std.testing.expectEqual(@as(u16, 0), space.metrics.width);
+    try std.testing.expectEqual(@as(u16, 0), space.metrics.height);
+    try std.testing.expectEqual(@as(usize, 0), space.pixels.len);
+    try std.testing.expect(space.metrics.advance > 0);
+
+    try std.testing.expectError(
+        error.InvalidCodepoint,
+        generator.generateSingle(allocator, 0x10ffff, &opts),
+    );
+}
+
+test "Generator produces packed MSDF10 glyphs" {
+    const allocator = std.testing.allocator;
+
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const font = try std.Io.Dir.cwd().readFileAlloc(io, fonts[0].path, allocator, .unlimited);
+    defer allocator.free(font);
+
+    var generator: Generator = try .create(font);
+    defer generator.destroy();
+
+    const opts: Generator.Options = .{
+        .sdf_type = .msdf10,
+        .px_size = px_size,
+        .px_range = px_range,
+    };
+    var glyph = try generator.generateSingle(allocator, 'A', &opts);
+    defer glyph.deinit(allocator);
+
+    try std.testing.expect(glyph.metrics.width > 0);
+    try std.testing.expect(glyph.metrics.height > 0);
+    try std.testing.expectEqual(
+        @as(usize, glyph.metrics.width) * glyph.metrics.height * @sizeOf(Generator.Msdf10Pixel),
+        glyph.pixels.len,
+    );
+
+    const pixels10 = std.mem.bytesAsSlice(Generator.Msdf10Pixel, glyph.pixels);
+    for (pixels10) |pixel|
+        try std.testing.expectEqual(std.math.maxInt(u2), pixel.a);
+}
+
+test "Generator atlas covers padding, empty glyphs, kerning, and scheduling modes" {
+    const allocator = std.testing.allocator;
+
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const font = try std.Io.Dir.cwd().readFileAlloc(io, fonts[0].path, allocator, .unlimited);
+    defer allocator.free(font);
+
+    var generator: Generator = try .create(font);
+    defer generator.destroy();
+
+    const codepoints = [_]u21{ 'A', 'V', ' ' };
+    const atlas_w = 128;
+    const atlas_h = 128;
+    const padding = 2;
+
+    var concurrent_opts: Generator.Options = .{
+        .sdf_type = .sdf,
+        .px_size = 24,
+        .px_range = px_range,
+    };
+    var concurrent = try generator.generateAtlas(
+        allocator,
+        io,
+        &codepoints,
+        atlas_w,
+        atlas_h,
+        padding,
+        true,
+        &concurrent_opts,
+    );
+    defer concurrent.deinit(allocator);
+
+    concurrent_opts.disable_concurrency = true;
+    var serial = try generator.generateAtlas(
+        allocator,
+        io,
+        &codepoints,
+        atlas_w,
+        atlas_h,
+        padding,
+        false,
+        &concurrent_opts,
+    );
+    defer serial.deinit(allocator);
+
+    try std.testing.expectEqual(codepoints.len, concurrent.glyphs.len);
+    try std.testing.expectEqual(codepoints.len, serial.glyphs.len);
+    try std.testing.expectEqual(@as(usize, atlas_w) * atlas_h, concurrent.pixels.len);
+    try std.testing.expectEqual(@as(usize, atlas_w) * atlas_h, serial.pixels.len);
+
+    for (codepoints, concurrent.glyphs, serial.glyphs) |codepoint, concurrent_glyph, serial_glyph| {
+        try std.testing.expectEqual(codepoint, concurrent_glyph.codepoint);
+        try std.testing.expectEqual(codepoint, serial_glyph.codepoint);
+        try std.testing.expectEqual(concurrent_glyph.glyph_data.advance, serial_glyph.glyph_data.advance);
+
+        if (codepoint == ' ') {
+            try std.testing.expectEqual(@as(i32, 0), concurrent_glyph.tex_bounds.w);
+            try std.testing.expectEqual(@as(i32, 0), concurrent_glyph.tex_bounds.h);
+            try std.testing.expectEqual(@as(i32, 0), serial_glyph.tex_bounds.w);
+            try std.testing.expectEqual(@as(i32, 0), serial_glyph.tex_bounds.h);
+        } else {
+            try std.testing.expect(concurrent_glyph.tex_bounds.w > padding * 2);
+            try std.testing.expect(concurrent_glyph.tex_bounds.h > padding * 2);
+            try std.testing.expect(concurrent_glyph.tex_bounds.x >= 0);
+            try std.testing.expect(concurrent_glyph.tex_bounds.y >= 0);
+            try std.testing.expect(concurrent_glyph.tex_bounds.x + concurrent_glyph.tex_bounds.w <= atlas_w);
+            try std.testing.expect(concurrent_glyph.tex_bounds.y + concurrent_glyph.tex_bounds.h <= atlas_h);
+        }
+    }
+}
