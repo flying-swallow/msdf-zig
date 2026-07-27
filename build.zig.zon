@@ -9,7 +9,7 @@
         "build.zig",
         "build.zig.zon",
     },
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0-dev.1465+8b2d0ce21",
     .dependencies = .{
         // Both lazy: only the FreeType font frontend needs them, so a consumer that builds the
         // `msdf-core` module (or passes `.font = false`) never fetches FreeType or turbopack. The

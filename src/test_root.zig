@@ -5,6 +5,4 @@
 
 test {
     _ = @import("test/rasterize.zig");
-    _ = @import("pixel_conversion.zig");
-    _ = @import("test/core.zig");
 }

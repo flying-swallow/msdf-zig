@@ -2,7 +2,7 @@ const std = @import("std");
 
 const EdgeSegment = @import("EdgeSegment.zig");
 const f64i = @import("math.zig").f64i;
-const findDistanceAt = @import("sdf.zig").findDistanceAt;
+const distance_eval = @import("distance.zig");
 const math = @import("math.zig");
 const Shape = @import("Shape.zig");
 
@@ -322,7 +322,7 @@ fn evaluateArtifact(self: *const ErrorCorrection, flags: ClassifierFlags, t: f64
     };
     const om = median(&old_sdf);
     const nm = median(&new_sdf);
-    const dist = findDistanceAt(
+    const dist = distance_eval.findDistanceAt(
         .psdf,
         self.dist_eval.shape.?.*,
         self.dist_eval.shape_coord + t_vec * self.dist_eval.texel_size,

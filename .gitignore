@@ -4,3 +4,6 @@ zig-pkg
 
 # Images written by the example
 example/*.png
+
+# Raster-test diagnostics
+*.ppm

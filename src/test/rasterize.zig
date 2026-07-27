@@ -1,9 +1,8 @@
 const std = @import("std");
 
 const Generator = @import("../Generator.zig");
-const pixel_conversion = @import("../pixel_conversion.zig");
-const Scanline = @import("../Scanline.zig");
 const math = @import("../math.zig");
+const Shape = @import("../Shape.zig");
 const ft = @import("mach-freetype");
 
 const f64i = math.f64i;
@@ -62,8 +61,6 @@ fn sampleSdf(pixels: []const u8, w: u16, h: u16, channels: u8, c: f64, r: f64) f
 }
 
 fn runCase(allocator: std.mem.Allocator, io: std.Io, font: []const u8, case: Case) !void {
-    if (case.opts.sdf_type == .psdf) return; // PSDF does not rasterize with distance fields
-
     var generator: Generator = try .create(font);
     defer generator.destroy();
 
@@ -71,6 +68,14 @@ fn runCase(allocator: std.mem.Allocator, io: std.Io, font: []const u8, case: Cas
     defer result.deinit(allocator);
 
     const pixels = result.pixels;
+    const channels = case.opts.sdf_type.numChannels();
+    const w = result.metrics.width;
+    const h = result.metrics.height;
+    try std.testing.expectEqual(@as(usize, w) * h * channels, pixels.len);
+
+    // PSDF generation is covered above, but PSDF is not intended to reproduce
+    // a filled-shape raster through median reconstruction.
+    if (case.opts.sdf_type == .psdf) return;
 
     var ref_library: ft.Library = try .init();
     defer ref_library.deinit();
@@ -82,10 +87,6 @@ fn runCase(allocator: std.mem.Allocator, io: std.Io, font: []const u8, case: Cas
     const units_per_em = f64i(ref_face.unitsPerEM());
 
     const target_sizes = [_]u32{ 12, 16, 24, 32, 48, 64, 96 };
-    const channels = case.opts.sdf_type.numChannels();
-    const w = result.metrics.width;
-    const h = result.metrics.height;
-
     if (w == 0 or h == 0) return; // empty glyph
 
     const bounds = .{
@@ -326,6 +327,7 @@ test "rasterize tests" {
     for (cases) |case| {
         runCase(allocator, io, font_data[case.font], case) catch |err| {
             if (err == error.OutOfMemory) return err;
+            std.debug.print("FAIL {s}: {t}\n", .{ case.name, err });
             failed += 1;
         };
     }
@@ -333,4 +335,18 @@ test "rasterize tests" {
         std.debug.print("\n{}/{} configurations failed\n", .{ failed, cases.len });
         return error.RasterizeFailed;
     }
+}
+
+test "Generator preserves public option and distance APIs" {
+    const opts: Generator.Options = .{
+        .sdf_type = .sdf,
+        .px_size = 16,
+        .px_range = 4,
+        .var_font_args = &.{},
+        .disable_concurrency = true,
+    };
+    try std.testing.expect(opts.disable_concurrency);
+
+    const shape: Shape = .{};
+    _ = Generator.findDistanceAt(.sdf, shape, .{ 0, 0 }, 1);
 }

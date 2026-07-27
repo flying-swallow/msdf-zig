@@ -74,9 +74,51 @@ pub const GeneratedAtlas = struct {
 pub const SdfType = sdf.SdfType;
 pub const ColoringMethod = sdf.ColoringMethod;
 pub const Winding = sdf.Winding;
-pub const VarFontArgument = sdf.VarFontArgument;
-pub const Options = sdf.Options;
 pub const Msdf10Pixel = sdf.Msdf10Pixel;
+pub const findDistanceAt = sdf.findDistanceAt;
+
+pub const VarFontArgument = struct {
+    name: []const u8,
+    value: f64,
+};
+
+/// Font and atlas generation options.
+///
+/// The raster fields intentionally remain flat for source compatibility with
+/// earlier versions of `Generator.Options`.
+pub const Options = struct {
+    sdf_type: SdfType,
+    px_size: u16,
+    px_range: u16,
+    coloring_rng_seed: u64 = 0,
+    coloring_method: ColoringMethod = .distance,
+    corner_angle_threshold: f64 = 3.0,
+    winding: Winding = .guess,
+    validate_shape: bool = false,
+    normalize_shape: bool = false,
+    orient_contours: bool = false,
+    scanline_fill_rule: ?Scanline.FillRule = null,
+    error_correction_opts: ?ErrorCorrection.Options = .{},
+    var_font_args: []const VarFontArgument = &.{},
+    disable_concurrency: bool = false,
+
+    fn rasterOptions(self: Options) sdf.Options {
+        return .{
+            .sdf_type = self.sdf_type,
+            .px_size = self.px_size,
+            .px_range = self.px_range,
+            .coloring_rng_seed = self.coloring_rng_seed,
+            .coloring_method = self.coloring_method,
+            .corner_angle_threshold = self.corner_angle_threshold,
+            .winding = self.winding,
+            .validate_shape = self.validate_shape,
+            .normalize_shape = self.normalize_shape,
+            .orient_contours = self.orient_contours,
+            .scanline_fill_rule = self.scanline_fill_rule,
+            .error_correction_opts = self.error_correction_opts,
+        };
+    }
+};
 
 const FreetypeContext = struct {
     allocator: std.mem.Allocator,
@@ -205,7 +247,8 @@ pub fn generateSingle(
             _ = shape.contours.swapRemove(@intCast(i));
         };
 
-    const generated = try sdf.generateFromShape(allocator, &shape, opts);
+    const raster_opts = opts.rasterOptions();
+    const generated = try sdf.generateFromShape(allocator, &shape, &raster_opts);
 
     return .{
         .metrics = .{
