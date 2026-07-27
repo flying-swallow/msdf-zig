@@ -83,7 +83,9 @@ pub fn main(init: std.process.Init) !void {
         @memcpy(image.data, glyph.pixels);
 
         var path_buf: [64]u8 = undefined;
-        const path = try std.fmt.bufPrintZ(&path_buf, "{u}_sdf.png", .{codepoint});
+        const formatted = try std.fmt.bufPrint(path_buf[0 .. path_buf.len - 1], "{u}_sdf.png", .{codepoint});
+        path_buf[formatted.len] = 0;
+        const path: [:0]const u8 = path_buf[0..formatted.len :0];
         try image.writeToFile(path, .png);
     }
 

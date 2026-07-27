@@ -1,6 +1,8 @@
 # msdf-zig
 A Zig implementation of [Viktor Chlumský's multi-channel signed distance field generator](https://github.com/Chlumsky/msdfgen).
 
+Requires Zig `0.17.0-dev.1465+8b2d0ce21` or newer.
+
 ## Usage
 ```zig
 const Generator = @import("msdf-zig");
@@ -42,6 +44,32 @@ for ([_]u21{ 'A', 'B', 'C' }) |codepoint| {
 ```
 
 A more in-depth example can be found in `example/generate.zig`.
+
+### FreeType-free shape generation
+
+Consumers that already have vector geometry can import `msdf-core` without
+fetching or linking FreeType and turbopack. Build a `Shape` from
+`Shape.Contour` and `EdgeSegment` values, then call:
+
+```zig
+const msdf = @import("msdf-core");
+
+const opts: msdf.Options = .{
+    .sdf_type = .msdf,
+    .px_size = 64,
+    .px_range = 8,
+};
+const data = try msdf.generateFromShape(allocator, &shape, &opts);
+defer data.deinit(allocator);
+```
+
+Pass `-Dfont=false` when building only the core module. Shape preprocessing and
+coloring use the same implementation as the font generator. Core options contain
+only geometry and raster controls; variable-font and atlas concurrency settings
+remain on `Generator.Options`.
+
+Output channels use msdfgen-compatible UNORM rounding. The experimental
+`msdf10` format stores three 10-bit distance channels in four bytes per pixel.
 
 ## Disclaimer
 This library might provide an option for it later, but you currently need to preprocess your fonts manually to resolve overlapping contours (if the font has them).

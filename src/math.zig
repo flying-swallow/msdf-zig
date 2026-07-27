@@ -2,6 +2,10 @@ const std = @import("std");
 
 const Vec2 = @Vector(2, f64);
 
+pub fn f64i(int: anytype) f64 {
+    return @floatFromInt(int);
+}
+
 pub const EquationParams = struct {
     a: f64,
     b: f64,
@@ -152,4 +156,42 @@ pub fn solveEquation(buf: []f64, params: *const EquationParams) []f64 {
     }
 
     return buf[0..1];
+}
+
+/// Quantizes a normalized value to an unsigned-normalized integer channel.
+///
+/// This ports msdfgen's `pixelFloatToByte` conversion and generalizes it over
+/// the channel width so packed 10-bit output can use the same rounding.
+pub fn floatToUnorm(comptime T: type, x: f64) T {
+    const max = std.math.maxInt(T);
+    const fmax: f64 = @floatFromInt(max);
+    const complement: f64 = fmax + 0.5 - fmax * std.math.clamp(x, 0.0, 1.0);
+    const truncated: i32 = @intFromFloat(complement);
+    return @intCast(max - truncated);
+}
+
+test "floatToUnorm matches msdfgen pixelFloatToByte" {
+    try std.testing.expectEqual(@as(u8, 0), floatToUnorm(u8, 0.0));
+    try std.testing.expectEqual(@as(u8, 0), floatToUnorm(u8, 0.001));
+    try std.testing.expectEqual(@as(u8, 64), floatToUnorm(u8, 0.25));
+    try std.testing.expectEqual(@as(u8, 127), floatToUnorm(u8, 0.5));
+    try std.testing.expectEqual(@as(u8, 153), floatToUnorm(u8, 0.6));
+    try std.testing.expectEqual(@as(u8, 156), floatToUnorm(u8, 0.61));
+    try std.testing.expectEqual(@as(u8, 191), floatToUnorm(u8, 0.75));
+    try std.testing.expectEqual(@as(u8, 229), floatToUnorm(u8, 0.9));
+    try std.testing.expectEqual(@as(u8, 255), floatToUnorm(u8, 0.999));
+    try std.testing.expectEqual(@as(u8, 255), floatToUnorm(u8, 1.0));
+}
+
+test "floatToUnorm clamps out-of-range input" {
+    try std.testing.expectEqual(@as(u8, 0), floatToUnorm(u8, -5.0));
+    try std.testing.expectEqual(@as(u8, 255), floatToUnorm(u8, 5.0));
+    try std.testing.expectEqual(@as(u10, 0), floatToUnorm(u10, -0.001));
+    try std.testing.expectEqual(@as(u10, 1023), floatToUnorm(u10, 1.5));
+}
+
+test "floatToUnorm spans the full range for each width" {
+    try std.testing.expectEqual(@as(u10, 0), floatToUnorm(u10, 0.0));
+    try std.testing.expectEqual(@as(u10, 511), floatToUnorm(u10, 0.5));
+    try std.testing.expectEqual(@as(u10, 1023), floatToUnorm(u10, 1.0));
 }

@@ -1,8 +1,8 @@
 const std = @import("std");
 
 const EdgeSegment = @import("EdgeSegment.zig");
-const f64i = @import("Generator.zig").f64i;
-const findDistanceAt = @import("Generator.zig").findDistanceAt;
+const f64i = @import("math.zig").f64i;
+const distance_eval = @import("distance.zig");
 const math = @import("math.zig");
 const Shape = @import("Shape.zig");
 
@@ -133,9 +133,9 @@ pub fn protectCorners(self: *ErrorCorrection, shape: *Shape, scale: f64, tfm: Ve
     for (shape.contours.items) |contour| {
         if (contour.edges.items.len == 0) continue;
 
-        var prev_edge = contour.edges.getLast();
+        var prev_edge = contour.edges.getLast().?;
         for (contour.edges.items) |edge| {
-            const common_color = @intFromEnum(prev_edge.color) & @intFromEnum(edge.color);
+            const common_color = @backingInt(prev_edge.color) & @backingInt(edge.color);
             prev_edge = edge;
             if ((common_color & (common_color - 1)) == 0) continue;
             const base_point = edge.point(0) * math.v2(scale) + tfm;
@@ -322,7 +322,7 @@ fn evaluateArtifact(self: *const ErrorCorrection, flags: ClassifierFlags, t: f64
     };
     const om = median(&old_sdf);
     const nm = median(&new_sdf);
-    const dist = findDistanceAt(
+    const dist = distance_eval.findDistanceAt(
         .psdf,
         self.dist_eval.shape.?.*,
         self.dist_eval.shape_coord + t_vec * self.dist_eval.texel_size,

@@ -1,17 +1,9 @@
 const std = @import("std");
 
-pub const c = @cImport({
-    @cInclude("freetype/ftadvanc.h");
-    @cInclude("freetype/ftbbox.h");
-    @cInclude("freetype/ftbitmap.h");
-    @cInclude("freetype/ftcolor.h");
-    @cInclude("freetype/ftlcdfil.h");
-    @cInclude("freetype/ftsizes.h");
-    @cInclude("freetype/ftstroke.h");
-    @cInclude("freetype/fttrigon.h");
-    @cInclude("freetype/ftsynth.h");
-    @cInclude("freetype/ftmm.h");
-});
+// `@cImport` was removed as a builtin in recent Zig; C headers are now translated by the
+// build system's translate-c step and exposed here as the "c" module (see build.zig, which
+// feeds it the FreeType headers listed in src/c.h).
+pub const c = @import("c");
 
 pub const Affine23 = c.FT_Affine23;
 pub const BBox = c.FT_BBox;
@@ -351,7 +343,7 @@ pub const Bitmap = struct {
     }
 
     pub fn pixelMode(self: Bitmap) PixelMode {
-        return @enumFromInt(self.handle.pixel_mode);
+        return @fromBackingInt(@intCast(self.handle.pixel_mode));
     }
 
     pub fn buffer(self: Bitmap) ?[]const u8 {
@@ -484,7 +476,7 @@ pub const Face = struct {
 
     pub fn getKerning(self: Face, left_char_index: u32, right_char_index: u32, mode: KerningMode) Error!Vector {
         var kerning: Vector = undefined;
-        try intToError(c.FT_Get_Kerning(self.handle, left_char_index, right_char_index, @intFromEnum(mode), &kerning));
+        try intToError(c.FT_Get_Kerning(self.handle, left_char_index, right_char_index, @backingInt(mode), &kerning));
         return kerning;
     }
 
@@ -510,7 +502,7 @@ pub const Face = struct {
     }
 
     pub fn selectCharmap(self: Face, encoding: Encoding) Error!void {
-        return intToError(c.FT_Select_Charmap(self.handle, @intFromEnum(encoding)));
+        return intToError(c.FT_Select_Charmap(self.handle, @backingInt(encoding)));
     }
 
     pub fn setCharmap(self: Face, char_map: *CharMap) Error!void {
@@ -595,7 +587,7 @@ pub const Face = struct {
 
     pub fn getColorGlyphPaint(self: Face, base_glyph: u32, root_transform: RootTransform) ?Paint {
         var opaque_paint: OpaquePaint = undefined;
-        if (c.FT_Get_Color_Glyph_Paint(self.handle, base_glyph, @intFromEnum(root_transform), &opaque_paint) == 0)
+        if (c.FT_Get_Color_Glyph_Paint(self.handle, base_glyph, @backingInt(root_transform), &opaque_paint) == 0)
             return null;
         return self.getPaint(opaque_paint);
     }
@@ -611,7 +603,7 @@ pub const Face = struct {
         var p: c.FT_COLR_Paint = undefined;
         if (c.FT_Get_Paint(self.handle, opaque_paint, &p) == 0)
             return null;
-        return switch (@as(PaintFormat, @enumFromInt(p.format))) {
+        return switch (@as(PaintFormat, @fromBackingInt(@intCast(p.format)))) {
             .color_layers => Paint{ .color_layers = p.u.colr_layers },
             .glyph => Paint{ .glyph = p.u.glyph },
             .solid => Paint{ .solid = p.u.solid },
@@ -800,7 +792,7 @@ pub const Glyph = struct {
     pub fn newGlyph(library: Library, glyph_format: GlyphFormat) Glyph {
         var g: c.FT_Glyph = undefined;
         return .{
-            .handle = c.FT_New_Glyph(library.handle, @intFromEnum(glyph_format), &g),
+            .handle = c.FT_New_Glyph(library.handle, @backingInt(glyph_format), &g),
         };
     }
 
@@ -816,17 +808,17 @@ pub const Glyph = struct {
 
     pub fn getCBox(self: Glyph, bbox_mode: BBoxMode) BBox {
         var b: BBox = undefined;
-        c.FT_Glyph_Get_CBox(self.handle, @intFromEnum(bbox_mode), &b);
+        c.FT_Glyph_Get_CBox(self.handle, @backingInt(bbox_mode), &b);
         return b;
     }
 
     pub fn toBitmapGlyph(self: *Glyph, render_mode: RenderMode, origin: ?Vector) Error!BitmapGlyph {
-        try intToError(c.FT_Glyph_To_Bitmap(&self.handle, @intFromEnum(render_mode), if (origin) |o| &o else null, 1));
+        try intToError(c.FT_Glyph_To_Bitmap(&self.handle, @backingInt(render_mode), if (origin) |o| &o else null, 1));
         return BitmapGlyph{ .handle = @ptrCast(self.handle) };
     }
 
     pub fn copyBitmapGlyph(self: *Glyph, render_mode: RenderMode, origin: ?Vector) Error!BitmapGlyph {
-        try intToError(c.FT_Glyph_To_Bitmap(&self.handle, @intFromEnum(render_mode), if (origin) |o| &o else null, 0));
+        try intToError(c.FT_Glyph_To_Bitmap(&self.handle, @backingInt(render_mode), if (origin) |o| &o else null, 0));
         return BitmapGlyph{ .handle = @ptrCast(self.handle) };
     }
 
@@ -851,7 +843,7 @@ pub const Glyph = struct {
     }
 
     pub fn format(self: Glyph) GlyphFormat {
-        return @enumFromInt(self.handle.*.format);
+        return @fromBackingInt(@intCast(self.handle.*.format));
     }
 
     pub fn advanceX(self: Glyph) isize {
@@ -937,7 +929,7 @@ pub const GlyphSlot = struct {
     }
 
     pub fn format(self: GlyphSlot) GlyphFormat {
-        return @enumFromInt(self.handle.*.format);
+        return @fromBackingInt(@intCast(self.handle.*.format));
     }
 
     pub fn ownBitmap(self: GlyphSlot) Error!void {
@@ -969,7 +961,7 @@ pub const GlyphSlot = struct {
     }
 
     pub fn render(self: GlyphSlot, render_mode: RenderMode) Error!void {
-        return intToError(c.FT_Render_Glyph(self.handle, @intFromEnum(render_mode)));
+        return intToError(c.FT_Render_Glyph(self.handle, @backingInt(render_mode)));
     }
 
     pub fn adjustWeight(self: GlyphSlot, x_delta: i32, y_delta: i32) void {
@@ -1060,7 +1052,7 @@ pub const Library = struct {
     }
 
     pub fn setLcdFilter(self: Library, lcd_filter: LcdFilter) Error!void {
-        return intToError(c.FT_Library_SetLcdFilter(self.handle, @intFromEnum(lcd_filter)));
+        return intToError(c.FT_Library_SetLcdFilter(self.handle, @backingInt(lcd_filter)));
     }
 
     pub fn destroyVarFontInfo(lib: Library, vf: ?*VarFontInfo) Error!void {
@@ -1190,15 +1182,15 @@ pub const Outline = struct {
     }
 
     pub fn orientation(self: Outline) Orientation {
-        return @enumFromInt(c.FT_Outline_Get_Orientation(self.handle));
+        return @fromBackingInt(@intCast(c.FT_Outline_Get_Orientation(self.handle)));
     }
 
     pub fn getInsideBorder(self: Outline) Border {
-        return @enumFromInt(c.FT_Outline_GetInsideBorder(self.handle));
+        return @fromBackingInt(@intCast(c.FT_Outline_GetInsideBorder(self.handle)));
     }
 
     pub fn getOutsideBorder(self: Outline) Border {
-        return @enumFromInt(c.FT_Outline_GetOutsideBorder(self.handle));
+        return @fromBackingInt(@intCast(c.FT_Outline_GetOutsideBorder(self.handle)));
     }
 
     pub fn Funcs(comptime Context: type) type {
@@ -1399,7 +1391,7 @@ pub const Stroker = struct {
     handle: c.FT_Stroker,
 
     pub fn set(self: Stroker, radius: i32, line_cap: LineCap, line_join: LineJoin, miter_limit: i32) void {
-        c.FT_Stroker_Set(self.handle, radius, @intFromEnum(line_cap), @intFromEnum(line_join), miter_limit);
+        c.FT_Stroker_Set(self.handle, radius, @backingInt(line_cap), @backingInt(line_join), miter_limit);
     }
 
     pub fn rewind(self: Stroker) void {
@@ -1432,12 +1424,12 @@ pub const Stroker = struct {
 
     pub fn getBorderCounts(self: Stroker, border: Border) Error!BorderCounts {
         var counts: BorderCounts = undefined;
-        try intToError(c.FT_Stroker_GetBorderCounts(self.handle, @intFromEnum(border), &counts.points, &counts.contours));
+        try intToError(c.FT_Stroker_GetBorderCounts(self.handle, @backingInt(border), &counts.points, &counts.contours));
         return counts;
     }
 
     pub fn exportBorder(self: Stroker, border: Border, outline: *Outline) void {
-        c.FT_Stroker_ExportBorder(self.handle, @intFromEnum(border), outline.handle);
+        c.FT_Stroker_ExportBorder(self.handle, @backingInt(border), outline.handle);
     }
 
     pub fn getCounts(self: Stroker) Error!BorderCounts {
